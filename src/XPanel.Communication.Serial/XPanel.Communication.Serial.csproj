@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>XPanel.Communication.Serial</AssemblyName>
+    <RootNamespace>XPanel.Communication.Serial</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XPanel.Core\XPanel.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- COM 串口访问（.NET 6+ 内置） -->
+    <PackageReference Include="System.IO.Ports" Version="4.7.0" />
+  </ItemGroup>
+
+</Project>

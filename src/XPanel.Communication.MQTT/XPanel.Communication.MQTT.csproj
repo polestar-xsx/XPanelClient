@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>XPanel.Communication.MQTT</AssemblyName>
+    <RootNamespace>XPanel.Communication.MQTT</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XPanel.Core\XPanel.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MQTT 客户端库 -->
+    <PackageReference Include="MQTTnet" Version="4.3.3.952" />
+  </ItemGroup>
+
+</Project>

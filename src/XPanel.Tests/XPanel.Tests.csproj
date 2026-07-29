@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <IsTestProject>true</IsTestProject>
+    <AssemblyName>XPanel.Tests</AssemblyName>
+    <RootNamespace>XPanel.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XPanel.Core\XPanel.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 测试框架 -->
+    <PackageReference Include="xunit" Version="2.6.4" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

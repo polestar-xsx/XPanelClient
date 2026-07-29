@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>XPanelClient</AssemblyName>
+    <RootNamespace>XPanel.Application</RootNamespace>
+    <StartupObject>XPanel.Application.App</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XPanel.Core\XPanel.Core.csproj" />
+    <ProjectReference Include="..\XPanel.Communication.Serial\XPanel.Communication.Serial.csproj" />
+    <ProjectReference Include="..\XPanel.Communication.Bluetooth\XPanel.Communication.Bluetooth.csproj" />
+    <ProjectReference Include="..\XPanel.Communication.MQTT\XPanel.Communication.MQTT.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MVVM Toolkit -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
+    <!-- Logging Framework -->
+    <PackageReference Include="Serilog" Version="3.1.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+    <!-- Windows Forms (System Tray) -->
+    <PackageReference Include="System.Windows.Forms" Version="4.0.0" />
+    <PackageReference Include="System.Drawing.Common" Version="6.0.0" />
+  </ItemGroup>
+
+  <!-- 输出配置 -->
+  <PropertyGroup>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+  </PropertyGroup>
+
+</Project>

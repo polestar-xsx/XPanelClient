@@ -1,0 +1,57 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31919.166
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Core", "src\XPanel.Core\XPanel.Core.csproj", "{1A8C4B2E-5F3A-4D6B-9E1C-7F2A5B8D3C9A}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{00000000-0000-0000-0000-000000000000}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+		Build-Project.ps1 = Build-Project.ps1
+		XPanelServer.md = XPanelServer.md
+		FRAMEWORK-SUMMARY.md = FRAMEWORK-SUMMARY.md
+	EndProjectSection
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Communication.Serial", "src\XPanel.Communication.Serial\XPanel.Communication.Serial.csproj", "{2B9D5C3F-6G4B-5E7C-AF2D-8G3B6C9E4D0B}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Communication.Bluetooth", "src\XPanel.Communication.Bluetooth\XPanel.Communication.Bluetooth.csproj", "{3C0E6D4G-7H5C-6F8D-BG3E-9H4C7D0F5E1C}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Communication.MQTT", "src\XPanel.Communication.MQTT\XPanel.Communication.MQTT.csproj", "{4D1F7E5H-8I6D-7G9E-CH4F-0I5D8E1G6F2D}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Application", "src\XPanel.Application\XPanel.Application.csproj", "{5E2G8F6I-9J7E-8H0F-DI5G-1J6E9F2H7G3E}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XPanel.Tests", "src\XPanel.Tests\XPanel.Tests.csproj", "{6F3H9G7J-0K8F-9I1G-EJ6H-2K7F0G3I8H4F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1A8C4B2E-5F3A-4D6B-9E1C-7F2A5B8D3C9A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A8C4B2E-5F3A-4D6B-9E1C-7F2A5B8D3C9A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A8C4B2E-5F3A-4D6B-9E1C-7F2A5B8D3C9A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A8C4B2E-5F3A-4D6B-9E1C-7F2A5B8D3C9A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2B9D5C3F-6G4B-5E7C-AF2D-8G3B6C9E4D0B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2B9D5C3F-6G4B-5E7C-AF2D-8G3B6C9E4D0B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2B9D5C3F-6G4B-5E7C-AF2D-8G3B6C9E4D0B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2B9D5C3F-6G4B-5E7C-AF2D-8G3B6C9E4D0B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3C0E6D4G-7H5C-6F8D-BG3E-9H4C7D0F5E1C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3C0E6D4G-7H5C-6F8D-BG3E-9H4C7D0F5E1C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3C0E6D4G-7H5C-6F8D-BG3E-9H4C7D0F5E1C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3C0E6D4G-7H5C-6F8D-BG3E-9H4C7D0F5E1C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4D1F7E5H-8I6D-7G9E-CH4F-0I5D8E1G6F2D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4D1F7E5H-8I6D-7G9E-CH4F-0I5D8E1G6F2D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4D1F7E5H-8I6D-7G9E-CH4F-0I5D8E1G6F2D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4D1F7E5H-8I6D-7G9E-CH4F-0I5D8E1G6F2D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5E2G8F6I-9J7E-8H0F-DI5G-1J6E9F2H7G3E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E2G8F6I-9J7E-8H0F-DI5G-1J6E9F2H7G3E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E2G8F6I-9J7E-8H0F-DI5G-1J6E9F2H7G3E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E2G8F6I-9J7E-8H0F-DI5G-1J6E9F2H7G3E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6F3H9G7J-0K8F-9I1G-EJ6H-2K7F0G3I8H4F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6F3H9G7J-0K8F-9I1G-EJ6H-2K7F0G3I8H4F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6F3H9G7J-0K8F-9I1G-EJ6H-2K7F0G3I8H4F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6F3H9G7J-0K8F-9I1G-EJ6H-2K7F0G3I8H4F}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

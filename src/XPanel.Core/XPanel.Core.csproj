@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>XPanel.Core</AssemblyName>
+    <RootNamespace>XPanel.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 日志框架 -->
+    <PackageReference Include="Serilog" Version="3.1.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>XPanel.Communication.Bluetooth</AssemblyName>
+    <RootNamespace>XPanel.Communication.Bluetooth</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XPanel.Core\XPanel.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BLE GATT (WinRT, Windows 10+) -->
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <!-- 经典蓝牙 SPP (兼容方案) -->
+    <PackageReference Include="InTheHand.Net.Bluetooth" Version="4.1.40" />
+  </ItemGroup>
+
+</Project>
