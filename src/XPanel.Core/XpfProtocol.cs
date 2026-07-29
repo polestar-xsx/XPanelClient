@@ -20,6 +20,7 @@ namespace XPanel.Core.Protocol
         public const ushort AppIdProtocolMgr = 106;
         public const ushort OpSessionHello = 0x0003;
         public const ushort OpSessionBye = 0x0004;
+        public const ushort OpSessionKeepalive = 0x0005;
 
         public const byte TlvAckForMsgId = 0x01;
         public const byte TlvEndpointId = 0x06;

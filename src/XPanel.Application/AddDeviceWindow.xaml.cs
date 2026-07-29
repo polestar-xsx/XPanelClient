@@ -249,7 +249,11 @@ namespace XPanel.Application
                 if (System.Windows.Application.Current is App app)
                 {
                     string channelKey = $"BLE:{selectedBleDevice.DeviceAddress}";
-                    bool registered = app.RegisterConnectedChannel(channelKey, bleChannel);
+                    bool registered = app.RegisterConnectedChannel(
+                        channelKey,
+                        bleChannel,
+                        handshakeResult.SessionId,
+                        handshakeResult.KeepaliveMs);
                     if (!registered)
                     {
                         SafeDisposeChannel(bleChannel);

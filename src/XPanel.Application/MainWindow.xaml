@@ -226,14 +226,17 @@
 
         <!-- Status Bar -->
         <Border Grid.Row="2" Background="#FAFAFA" BorderBrush="#E0E0E0" BorderThickness="0,1,0,0">
-            <StackPanel Orientation="Horizontal" Margin="20,12">
-                <Ellipse Name="ConnectionStatusDot" Width="10" Height="10" Fill="#FF9800" Margin="0,0,10,0" VerticalAlignment="Center"/>
-                <TextBlock Name="ConnectionStateText" Text="Disconnected" VerticalAlignment="Center" Margin="0,0,15,0" FontSize="12"/>
-                <TextBlock Text="|" Margin="0,0,15,0" Foreground="#CCC"/>
-                <TextBlock Name="ConnectionDeviceText" Text="No connection" VerticalAlignment="Center" Foreground="#666" Margin="0,0,15,0" FontSize="12"/>
-                <TextBlock Text="|" Margin="0,0,15,0" Foreground="#CCC"/>
-                <TextBlock Name="ConnectionMethodText" Text="Waiting" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
-            </StackPanel>
+            <Grid Margin="20,12">
+                <TextBlock Name="NoDeviceStatusText"
+                           Text="No Device"
+                           Foreground="#666"
+                           FontSize="12"
+                           VerticalAlignment="Center"/>
+                <StackPanel Name="DeviceStatusGroupPanel"
+                            Orientation="Horizontal"
+                            Visibility="Collapsed"
+                            VerticalAlignment="Center"/>
+            </Grid>
         </Border>
     </Grid>
 </Window>
