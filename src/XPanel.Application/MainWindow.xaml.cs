@@ -179,11 +179,17 @@ namespace XPanel.Application
 
         private WinForms.NotifyIcon _trayIcon;
         private bool _isShuttingDown = false;
+        private bool _startupBootstrapTriggered;
         private readonly BluetoothDeviceManager _bluetoothDeviceManager = new();
         private readonly Dictionary<string, ConnectedDeviceEntry> _connectedDevices = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, PersistedDeviceItem> _savedDevices = new(StringComparer.OrdinalIgnoreCase);
         private readonly ISyncItemProvider _syncItemService = new SyncItemService();
         private List<SyncItem> _currentSyncItems = new();
+        private string _selectedDeviceKey = string.Empty;
+        private List<SyncItem> _selectedDeviceSyncItems = new();
+        private readonly Dictionary<string, CancellationTokenSource> _timeSyncLoops = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _timeSyncLock = new();
+        private static readonly TimeSpan TimeSyncInterval = TimeSpan.FromMinutes(30);
 
         public MainWindow()
         {
@@ -196,10 +202,25 @@ namespace XPanel.Application
             // 绑定标签页切换事件
             LeftTabControl.SelectionChanged += (s, e) => UpdateTabContent();
             Loaded += MainWindow_Loaded;
+
+            // 托盘隐藏启动时，保证自动连接逻辑也会立即执行。
+            _ = RunStartupBootstrapAsync();
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            await RunStartupBootstrapAsync();
+        }
+
+        private async Task RunStartupBootstrapAsync()
+        {
+            if (_startupBootstrapTriggered)
+            {
+                return;
+            }
+
+            _startupBootstrapTriggered = true;
+
             LoadSavedDevicesIntoCache();
             InitializeDeviceEntriesFromSaved();
             RefreshConnectedDeviceUi();
@@ -298,11 +319,64 @@ namespace XPanel.Application
             RefreshSyncItemsUi();
         }
 
+        private void InitializeDeviceSelectorForSync()
+        {
+            DeviceSelector.Items.Clear();
+            DeviceSelector.SelectionChanged -= DeviceSelector_SelectionChanged;
+
+            foreach (var device in _connectedDevices.Values.OrderBy(d => d.DeviceName))
+            {
+                DeviceSelector.Items.Add(new ComboBoxItem { Content = device.DeviceName, Tag = device.ChannelKey });
+            }
+
+            DeviceSelector.SelectionChanged += DeviceSelector_SelectionChanged;
+        }
+
+        private void DeviceSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (DeviceSelector.SelectedItem is ComboBoxItem selectedItem && selectedItem.Tag is string channelKey)
+            {
+                // 保存前一个设备的配置
+                if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var prevDevice))
+                {
+                    prevDevice.SyncConfig = new List<SyncItem>(_selectedDeviceSyncItems);
+                }
+
+                // 切换到新设备
+                _selectedDeviceKey = channelKey;
+                RefreshSyncItemsUi();
+                SaveSavedDevicesToConfig();
+            }
+        }
+
         private void RefreshSyncItemsUi()
         {
             SyncItemsPanel.Children.Clear();
 
-            foreach (var item in _currentSyncItems)
+            // 获取当前设备的同步配置
+            if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var device))
+            {
+                if (device.SyncConfig.Count > 0)
+                {
+                    _selectedDeviceSyncItems = device.SyncConfig.OrderBy(x => x.Priority).ToList();
+                }
+                else
+                {
+                    // 初始化新设备的配置
+                    _selectedDeviceSyncItems = new List<SyncItem>();
+                    foreach (var defaultItem in _currentSyncItems)
+                    {
+                        _selectedDeviceSyncItems.Add(new SyncItem(defaultItem.Name, defaultItem.Category, defaultItem.IsEnabled) { Priority = defaultItem.Priority });
+                    }
+                    device.SyncConfig = _selectedDeviceSyncItems;
+                }
+            }
+            else
+            {
+                _selectedDeviceSyncItems = new List<SyncItem>(_currentSyncItems);
+            }
+
+            foreach (var item in _selectedDeviceSyncItems)
             {
                 var rowBorder = new Border
                 {
@@ -356,7 +430,19 @@ namespace XPanel.Application
         {
             item.IsEnabled = isEnabled;
             _syncItemService.OnItemToggled(item);
-            _syncItemService.SaveItems(_currentSyncItems);
+
+            // 保存到当前选择的设备配置
+            if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var device))
+            {
+                device.SyncConfig = new List<SyncItem>(_selectedDeviceSyncItems);
+                SaveSavedDevicesToConfig();
+            }
+
+            if (string.Equals(item.Category, "Time", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(_selectedDeviceKey))
+            {
+                EnsureTimeSyncScheduleForDevice(_selectedDeviceKey);
+            }
         }
 
         private void UpdateTabContent()
@@ -372,11 +458,16 @@ namespace XPanel.Application
                 SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
                 SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
                 AddDeviceBottomButton.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+                DeviceSelectorPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
 
                 // 当切换到Synchronization页面时，刷新UI
                 if (LeftTabControl.SelectedIndex == 1)
                 {
-                    RefreshSyncItemsUi();
+                    InitializeDeviceSelectorForSync();
+                    if (DeviceSelector.Items.Count > 0)
+                    {
+                        DeviceSelector.SelectedIndex = 0;
+                    }
                 }
             }
         }
@@ -402,6 +493,7 @@ namespace XPanel.Application
 
         protected override void OnClosed(System.EventArgs e)
         {
+            StopAllTimeSyncSchedules();
             _trayIcon?.Dispose();
             _bluetoothDeviceManager.Dispose();
             base.OnClosed(e);
@@ -432,12 +524,21 @@ namespace XPanel.Application
                     addDeviceWindow.ConnectedSessionId,
                     DeviceConnectionVisualState.Connected);
 
+                var syncConfig = new List<SyncItem>();
+                foreach (var item in _currentSyncItems)
+                {
+                    syncConfig.Add(new SyncItem(item.Name, item.Category, item.IsEnabled) { Priority = item.Priority });
+                }
+
                 _savedDevices[channelKey] = new PersistedDeviceItem
                 {
                     DeviceName = addDeviceWindow.ConnectedDeviceName,
                     DeviceAddress = address,
                     Channel = normalizedChannel,
+                    SyncConfig = syncConfig,
                 };
+
+                EnsureTimeSyncScheduleForDevice(channelKey);
 
                 RefreshConnectedDeviceUi();
                 SaveSavedDevicesToConfig();
@@ -465,8 +566,16 @@ namespace XPanel.Application
                 }
             }
 
+            bool needResumeTimeSync = IsTimeSyncEnabledForDevice(channelKey);
+            StopTimeSyncSchedule(channelKey);
+
             if (!removedFromChannel)
             {
+                if (needResumeTimeSync)
+                {
+                    EnsureTimeSyncScheduleForDevice(channelKey);
+                }
+
                 removeButton.IsEnabled = true;
                 System.Windows.MessageBox.Show("Failed to disconnect device.", "Remove Device", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -768,6 +877,7 @@ namespace XPanel.Application
                         channelLabel,
                         handshake.SessionId,
                         DeviceConnectionVisualState.Connected);
+                    EnsureTimeSyncScheduleForDevice(channelKey);
                     RefreshConnectedDeviceUi();
                 }
                 catch
@@ -775,6 +885,7 @@ namespace XPanel.Application
                     // 单个设备自动连接失败时继续处理其他设备。
                     if (_connectedDevices.TryGetValue(channelKey, out var existing))
                     {
+                        StopTimeSyncSchedule(channelKey);
                         _connectedDevices[channelKey] = existing with
                         {
                             Status = DeviceConnectionVisualState.Disconnected,
@@ -1029,6 +1140,148 @@ namespace XPanel.Application
             return true;
         }
 
+        private bool IsTimeSyncEnabledForDevice(string channelKey)
+        {
+            if (!_savedDevices.TryGetValue(channelKey, out var device) || device.SyncConfig == null)
+            {
+                return false;
+            }
+
+            return device.SyncConfig.Any(item =>
+                string.Equals(item.Category, "Time", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private bool IsDeviceConnectedForTimeSync(string channelKey)
+        {
+            return _connectedDevices.TryGetValue(channelKey, out var device)
+                && device.Status == DeviceConnectionVisualState.Connected
+                && device.SessionId.HasValue;
+        }
+
+        private void EnsureTimeSyncScheduleForDevice(string channelKey)
+        {
+            if (string.IsNullOrWhiteSpace(channelKey))
+            {
+                return;
+            }
+
+            if (!IsTimeSyncEnabledForDevice(channelKey) || !IsDeviceConnectedForTimeSync(channelKey))
+            {
+                StopTimeSyncSchedule(channelKey);
+                return;
+            }
+
+            StartTimeSyncSchedule(channelKey);
+        }
+
+        private void StartTimeSyncSchedule(string channelKey)
+        {
+            CancellationTokenSource loopCts;
+
+            lock (_timeSyncLock)
+            {
+                if (_timeSyncLoops.ContainsKey(channelKey))
+                {
+                    return;
+                }
+
+                loopCts = new CancellationTokenSource();
+                _timeSyncLoops[channelKey] = loopCts;
+            }
+
+            _ = RunTimeSyncLoopAsync(channelKey, loopCts);
+        }
+
+        private void StopTimeSyncSchedule(string channelKey)
+        {
+            CancellationTokenSource? loopCts = null;
+
+            lock (_timeSyncLock)
+            {
+                if (_timeSyncLoops.TryGetValue(channelKey, out var existing))
+                {
+                    loopCts = existing;
+                    _timeSyncLoops.Remove(channelKey);
+                }
+            }
+
+            if (loopCts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                loopCts.Cancel();
+            }
+            catch
+            {
+                // 取消失败不阻断流程。
+            }
+        }
+
+        private void StopAllTimeSyncSchedules()
+        {
+            List<string> keys;
+            lock (_timeSyncLock)
+            {
+                keys = _timeSyncLoops.Keys.ToList();
+            }
+
+            foreach (var key in keys)
+            {
+                StopTimeSyncSchedule(key);
+            }
+        }
+
+        private async Task RunTimeSyncLoopAsync(string channelKey, CancellationTokenSource loopCts)
+        {
+            try
+            {
+                while (!loopCts.Token.IsCancellationRequested)
+                {
+                    if (!IsTimeSyncEnabledForDevice(channelKey) || !IsDeviceConnectedForTimeSync(channelKey))
+                    {
+                        break;
+                    }
+
+                    bool sent = await SendTimeSyncNowAsync(channelKey, loopCts.Token);
+                    if (!sent)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Time Sync send failed for {channelKey}");
+                    }
+
+                    await Task.Delay(TimeSyncInterval, loopCts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 正常停止。
+            }
+            finally
+            {
+                lock (_timeSyncLock)
+                {
+                    if (_timeSyncLoops.TryGetValue(channelKey, out var existing) && ReferenceEquals(existing, loopCts))
+                    {
+                        _timeSyncLoops.Remove(channelKey);
+                    }
+                }
+
+                loopCts.Dispose();
+            }
+        }
+
+        private static async Task<bool> SendTimeSyncNowAsync(string channelKey, CancellationToken cancellationToken)
+        {
+            if (System.Windows.Application.Current is not App app)
+            {
+                return false;
+            }
+
+            return await app.SendTimeSyncAsync(channelKey, cancellationToken: cancellationToken);
+        }
+
         private void LoadSavedDevicesIntoCache()
         {
             try
@@ -1065,6 +1318,7 @@ namespace XPanel.Application
                         DeviceName = device.DeviceName,
                         DeviceAddress = device.DeviceAddress,
                         Channel = channel,
+                        SyncConfig = device.SyncConfig ?? new List<SyncItem>(),
                     };
                 }
             }
@@ -1092,6 +1346,7 @@ namespace XPanel.Application
                             DeviceName = d.DeviceName,
                             DeviceAddress = d.DeviceAddress,
                             Channel = NormalizeChannelLabel(d.Channel),
+                            SyncConfig = d.SyncConfig,
                         })
                         .Where(d => !string.IsNullOrWhiteSpace(d.DeviceAddress))
                         .OrderBy(d => d.DeviceName, StringComparer.OrdinalIgnoreCase)
@@ -1134,6 +1389,7 @@ namespace XPanel.Application
             public string DeviceName { get; set; } = string.Empty;
             public string DeviceAddress { get; set; } = string.Empty;
             public string Channel { get; set; } = "BLE";
+            public List<SyncItem> SyncConfig { get; set; } = new();
         }
 
         private sealed record SessionHandshakeResult(uint SessionId, ushort KeepaliveMs);

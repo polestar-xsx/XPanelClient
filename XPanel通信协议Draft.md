@@ -101,6 +101,10 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0D | keepalive_ms | uint16 | 保活周期（毫秒） |
 | 0x0E | session_id | uint32 | 会话ID |
 | 0x0F | session_ttl_ms | uint32 | 会话有效期（毫秒） |
+| 0x10 | time_unix_sec | uint32 | 要设置的 Unix 时间（秒） |
+| 0x11 | time_tz_offset_min | int16(two's complement) | 时区偏移分钟（如 UTC+8=480） |
+| 0x12 | time_src | uint8 | 时间来源（1=manual,2=ntp,3=phone） |
+| 0x13 | time_set_mode | uint8 | 设置模式（1=RTC only,2=RTC+system） |
 | 0x20~0x7F | op params | mixed | 业务参数区 |
 | 0xF0~0xFF | vendor ext | bytes | 厂商扩展 |
 
@@ -142,6 +146,7 @@ T(1B) + L(2B) + V(L bytes)
 | 104 | WebServerMgr |
 | 105 | BLEMgr |
 | 106 | ProtocolMgr（未来） |
+| 107 | RTCMgr（建议） |
 
 ### 4.3 op_code 建议表（MVP）
 
@@ -158,6 +163,8 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0040 | nvm.write |
 | 0x0041 | nvm.read |
 | 0x0050 | net.scan |
+| 0x0051 | time.sync |
+| 0x0052 | time.query |
 | 0x0060 | radio.play |
 | 0x00F0 | system.reboot |
 
@@ -361,6 +368,68 @@ T(1B) + L(2B) + V(L bytes)
   - 重复包（去重验证）
   - 超时包（重传验证）
   - 非法头/CRC（健壮性验证）
+
+---
+
+## 10. 时间同步（控制端 -> 设备）字段填充规范
+
+结论:
+- 现在协议可以发时间同步，但建议按本节补充后的 `time.sync` 标准实现，避免各端自定义字段。
+
+### 10.1 请求包字段（推荐）
+
+- Header:
+  - `msg_type = cmd`
+  - `flags.need_ack = 1`
+  - `qos_level = 1`
+  - `app_id = 107 (RTCMgr)`，若当前实现未接 RTC 路由，可临时用 `100 (NetworkMgr)`
+  - `op_code = 0x0051 (time.sync)`
+  - `msg_id = 控制端递增/随机 uint32`
+  - `ts_sec = 控制端发送时刻`
+- TLV:
+  - 必填 `session_id(0x0E)`：握手后会话ID
+  - 必填 `time_unix_sec(0x10)`：目标 Unix 秒
+  - 必填 `time_tz_offset_min(0x11)`：时区分钟偏移
+  - 必填 `time_src(0x12)`：建议填 `3 (phone)` 或 `2 (ntp)`
+  - 可选 `time_set_mode(0x13)`：建议填 `2 (RTC+system)`
+  - 可选 `req_id(0x0A)`：用于幂等
+
+### 10.2 响应包字段（推荐）
+
+- `msg_type = resp`（或 `error`）
+- `op_code = 0x0051`
+- TLV 至少包含:
+  - `ack_for_msg_id(0x01)`
+  - 成功时可回 `time_unix_sec(0x10)`（设备最终生效值）
+  - 失败时回 `err_code(0x07)` + `err_msg(0x08)`
+
+### 10.3 典型返回码建议
+
+- `4010 Handshake Required`：未握手
+- `4011 Invalid Session`：会话ID错误
+- `4012 Session Expired / Keepalive Timeout`：会话过期
+- `4001 Bad Request`：缺少时间字段或字段类型非法
+
+### 10.4 time.sync TLV 示例
+
+场景:
+- 设置时间为 `2026-07-31 12:00:00 UTC+8`
+- `time_unix_sec = 1785499200`（示例值）
+- `tz_offset = +480`
+
+TLV 示例（十六进制）:
+
+```text
+0E 00 04 12 34 56 78   // session_id
+10 00 04 6A 6F 2D 20   // time_unix_sec (示例)
+11 00 02 01 E0         // time_tz_offset_min = 480
+12 00 01 03            // time_src = phone
+13 00 01 02            // time_set_mode = RTC+system
+0A 00 04 00 00 00 9A   // req_id (可选)
+```
+
+说明:
+- `time_unix_sec` 示例值仅示意编码格式，控制端应使用实时计算值。
 
 ---
 

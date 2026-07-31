@@ -18,9 +18,11 @@ namespace XPanel.Core.Protocol
     public static class XpfProtocolConstants
     {
         public const ushort AppIdProtocolMgr = 106;
+        public const ushort AppIdRtcMgr = 107;
         public const ushort OpSessionHello = 0x0003;
         public const ushort OpSessionBye = 0x0004;
         public const ushort OpSessionKeepalive = 0x0005;
+        public const ushort OpTimeSync = 0x0051;
 
         public const byte TlvAckForMsgId = 0x01;
         public const byte TlvEndpointId = 0x06;
@@ -28,6 +30,10 @@ namespace XPanel.Core.Protocol
         public const byte TlvServerNonce = 0x0C;
         public const byte TlvKeepaliveMs = 0x0D;
         public const byte TlvSessionId = 0x0E;
+        public const byte TlvTimeUnixSec = 0x10;
+        public const byte TlvTimeTzOffsetMin = 0x11;
+        public const byte TlvTimeSource = 0x12;
+        public const byte TlvTimeSetMode = 0x13;
     }
 
     public sealed class XpfFrame
@@ -168,6 +174,14 @@ namespace XPanel.Core.Protocol
             };
         }
 
+        public static byte[] EncodeInt16(short value)
+        {
+            unchecked
+            {
+                return EncodeUInt16((ushort)value);
+            }
+        }
+
         public static bool TryReadUInt16(Dictionary<byte, byte[]> tlvs, byte type, out ushort value)
         {
             value = default;
@@ -189,6 +203,22 @@ namespace XPanel.Core.Protocol
             }
 
             value = (uint)((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]);
+            return true;
+        }
+
+        public static bool TryReadInt16(Dictionary<byte, byte[]> tlvs, byte type, out short value)
+        {
+            value = default;
+            if (!TryReadUInt16(tlvs, type, out ushort raw))
+            {
+                return false;
+            }
+
+            unchecked
+            {
+                value = (short)raw;
+            }
+
             return true;
         }
 

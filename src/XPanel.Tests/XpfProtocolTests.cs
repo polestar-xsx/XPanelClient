@@ -43,5 +43,45 @@ namespace XPanel.Tests
             Assert.True(XpfCodec.TryReadUInt16(parsed.Tlvs, XpfProtocolConstants.TlvKeepaliveMs, out var keepalive));
             Assert.Equal((ushort)25000, keepalive);
         }
+
+        [Fact]
+        public void SerializeAndDeserialize_TimeSyncFrame_RoundTrips()
+        {
+            const uint unixSec = 1764500000;
+            const short timezoneOffsetMin = 480;
+
+            var frame = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                Hop = 0,
+                AppId = XpfProtocolConstants.AppIdRtcMgr,
+                OpCode = XpfProtocolConstants.OpTimeSync,
+                MsgId = 654321,
+                TimestampSec = unixSec,
+            };
+
+            frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(1234);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeUnixSec] = XpfCodec.EncodeUInt32(unixSec);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeTzOffsetMin] = XpfCodec.EncodeInt16(timezoneOffsetMin);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeSource] = new byte[] { 1 };
+            frame.Tlvs[XpfProtocolConstants.TlvTimeSetMode] = new byte[] { 2 };
+
+            byte[] serialized = XpfCodec.Serialize(frame);
+            XpfFrame parsed = XpfCodec.Deserialize(serialized);
+
+            Assert.Equal(XpfProtocolConstants.AppIdRtcMgr, parsed.AppId);
+            Assert.Equal(XpfProtocolConstants.OpTimeSync, parsed.OpCode);
+
+            Assert.True(XpfCodec.TryReadUInt32(parsed.Tlvs, XpfProtocolConstants.TlvTimeUnixSec, out var parsedUnixSec));
+            Assert.Equal(unixSec, parsedUnixSec);
+
+            Assert.True(XpfCodec.TryReadInt16(parsed.Tlvs, XpfProtocolConstants.TlvTimeTzOffsetMin, out var parsedOffset));
+            Assert.Equal(timezoneOffsetMin, parsedOffset);
+
+            Assert.Equal((byte)1, parsed.Tlvs[XpfProtocolConstants.TlvTimeSource][0]);
+            Assert.Equal((byte)2, parsed.Tlvs[XpfProtocolConstants.TlvTimeSetMode][0]);
+        }
     }
 }

@@ -115,6 +115,55 @@ namespace XPanel.Application
             return true;
         }
 
+        public async Task<bool> SendTimeSyncAsync(
+            string key,
+            byte timeSource = 1,
+            byte timeSetMode = 2,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return false;
+            }
+
+            ICommunicationChannel? channel;
+            uint sessionId;
+
+            lock (_channelLock)
+            {
+                if (!_connectedChannels.TryGetValue(key, out channel) ||
+                    !_channelSessions.TryGetValue(key, out sessionId))
+                {
+                    return false;
+                }
+            }
+
+            if (channel == null)
+            {
+                return false;
+            }
+
+            DateTimeOffset now = DateTimeOffset.Now;
+            int offsetMinutes = (int)now.Offset.TotalMinutes;
+            if (offsetMinutes > short.MaxValue)
+            {
+                offsetMinutes = short.MaxValue;
+            }
+            else if (offsetMinutes < short.MinValue)
+            {
+                offsetMinutes = short.MinValue;
+            }
+
+            return await SendTimeSyncFrameAsync(
+                channel,
+                sessionId,
+                (uint)now.ToUnixTimeSeconds(),
+                (short)offsetMinutes,
+                timeSource,
+                timeSetMode,
+                cancellationToken);
+        }
+
         public async Task ShutdownConnectionsAsync()
         {
             await _shutdownGate.WaitAsync();
@@ -474,6 +523,39 @@ namespace XPanel.Application
             {
                 channel.DataReceived -= OnDataReceived;
             }
+        }
+
+        private static async Task<bool> SendTimeSyncFrameAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            uint unixSec,
+            short timezoneOffsetMin,
+            byte timeSource,
+            byte timeSetMode,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+
+            var frame = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                Hop = 0,
+                AppId = XpfProtocolConstants.AppIdRtcMgr,
+                OpCode = XpfProtocolConstants.OpTimeSync,
+                MsgId = msgId,
+                TimestampSec = unixSec,
+            };
+
+            frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeUnixSec] = XpfCodec.EncodeUInt32(unixSec);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeTzOffsetMin] = XpfCodec.EncodeInt16(timezoneOffsetMin);
+            frame.Tlvs[XpfProtocolConstants.TlvTimeSource] = new[] { timeSource };
+            frame.Tlvs[XpfProtocolConstants.TlvTimeSetMode] = new[] { timeSetMode };
+
+            byte[] payload = XpfCodec.Serialize(frame);
+            return await channel.SendAsync(payload, cancellationToken);
         }
 
         protected override void OnStartup(StartupEventArgs e)
