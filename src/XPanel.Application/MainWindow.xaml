@@ -12,15 +12,17 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type TabItem}">
-                        <Grid Height="50" Background="Transparent" Margin="12,4">
+                        <Grid Height="30" Background="Transparent" Margin="12,4">
                             <Border Name="Border" 
+                                    Height="30"
                                     Background="#FFFFFF"
                                     BorderBrush="#E0E0E0"
                                     BorderThickness="0"
                                     CornerRadius="10"
                                     Padding="25,0"
                                     Margin="0"
-                                    HorizontalAlignment="Stretch">
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Stretch">
                                 <ContentPresenter x:Name="ContentSite"
                                                   VerticalAlignment="Center"
                                                   HorizontalAlignment="Center"
@@ -52,6 +54,42 @@
                 </Setter.Value>
             </Setter>
             <Setter Property="Foreground" Value="#333333"/>
+            <Setter Property="FontSize" Value="14"/>
+        </Style>
+
+        <!-- Toggle Button Style for Sync Items -->
+        <Style x:Key="ToggleSwitchStyle" TargetType="{x:Type ToggleButton}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                        <Border x:Name="SwitchBorder" 
+                                Background="#E0E0E0" 
+                                CornerRadius="12" 
+                                Width="50" 
+                                Height="24"
+                                BorderThickness="0">
+                            <Canvas>
+                                <Ellipse x:Name="SwitchCircle" 
+                                         Width="20" 
+                                         Height="20" 
+                                         Fill="White" 
+                                         Canvas.Top="2" 
+                                         Canvas.Left="2"/>
+                            </Canvas>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="SwitchBorder" Property="Background" Value="#4CAF50"/>
+                                <Setter TargetName="SwitchCircle" Property="Canvas.Left" Value="28"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="SwitchBorder" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Cursor" Value="Hand"/>
         </Style>
 
         <!-- Rounded rectangle button style -->
@@ -119,7 +157,7 @@
                         <TabItem Header="Device" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
-                        <TabItem Header="Device Control" Style="{StaticResource ModernTabItemStyle}">
+                        <TabItem Header="Synchronization" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
                         <TabItem Header="System Settings" Style="{StaticResource ModernTabItemStyle}">
@@ -137,7 +175,7 @@
                 </Grid.RowDefinitions>
 
                 <!-- Tab Content Header -->
-                <Border Grid.Row="0" Background="#FAFAFA" Padding="20,15" BorderBrush="#E0E0E0" BorderThickness="0,0,0,1">
+                <Border Grid.Row="0" Background="#FAFAFA" Padding="20,15" BorderBrush="#E0E0E0" BorderThickness="0">
                     <TextBlock Name="TabHeader" Text="Device Information" FontSize="18" FontWeight="Bold" Foreground="#333333"/>
                 </Border>
 
@@ -161,7 +199,7 @@
                             </Grid.RowDefinitions>
 
                             <!-- Title -->
-                            <TextBlock Grid.Row="0" Text="Connected Devices" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
+                            <TextBlock Grid.Row="0" Text="Connected Devices" FontSize="14" FontWeight="Bold" Margin="0,0,0,15" Visibility="Collapsed"/>
 
                             <!-- Connected Device Cards -->
                             <Grid Grid.Row="1">
@@ -174,15 +212,11 @@
                         </Grid>
                     </StackPanel>
 
-                    <!-- Control Panel -->
-                    <StackPanel Grid.Row="0" Grid.Column="1" Name="ControlPanel" Margin="10,0,0,0">
-                        <TextBlock Text="Quick Actions" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
-                        <Button Content="Connect Device" Padding="15,10" Background="#2196F3" Foreground="White" 
-                               FontSize="12" Cursor="Hand" Margin="0,0,0,10"/>
-                        <Button Content="Disconnect" Padding="15,10" Background="#FF9800" Foreground="White" 
-                               FontSize="12" Cursor="Hand" Margin="0,0,0,10"/>
-                        <Button Content="Refresh Status" Padding="15,10" Background="#4CAF50" Foreground="White" 
-                               FontSize="12" Cursor="Hand"/>
+                    <!-- Synchronization Panel -->
+                    <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="SyncPanel" Margin="0" Visibility="Collapsed">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Name="SyncItemsPanel" Margin="0"/>
+                        </ScrollViewer>
                     </StackPanel>
 
                     <!-- Settings Panel -->

@@ -1,10 +1,146 @@
 <Window x:Class="XPanel.Application.AddDeviceWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Add Device" Height="500" Width="500"
+        Title="Add Device" Height="350" Width="450"
         WindowStartupLocation="CenterOwner"
         Background="#F8F9FA"
         ResizeMode="NoResize">
+    
+    <Window.Resources>
+        <!-- Rounded rectangle ComboBox style -->
+        <Style x:Key="RoundedRectComboBoxStyle" TargetType="{x:Type ComboBox}">
+            <Setter Property="Foreground" Value="#333333"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="BorderBrush" Value="#E0E0E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBox}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="30"/>
+                            </Grid.ColumnDefinitions>
+                            
+                            <!-- Display area for selected item -->
+                            <Border Grid.Column="0"
+                                   Background="{TemplateBinding Background}"
+                                   BorderBrush="{TemplateBinding BorderBrush}"
+                                   BorderThickness="{TemplateBinding BorderThickness}"
+                                   CornerRadius="8,0,0,8"
+                                   Padding="10,8">
+                                <ContentPresenter x:Name="ContentPresenter"
+                                                 Content="{TemplateBinding SelectionBoxItem}"
+                                                 ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                 VerticalAlignment="Center"/>
+                            </Border>
+
+                            <!-- Toggle button for dropdown -->
+                            <ToggleButton Grid.Column="1"
+                                         Name="ToggleButton"
+                                         Focusable="False"
+                                         IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                         ClickMode="Press"
+                                         Background="{TemplateBinding Background}"
+                                         BorderBrush="{TemplateBinding BorderBrush}"
+                                         BorderThickness="0,1,1,1"
+                                         Padding="5">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                                        <Border x:Name="Border"
+                                               Background="{TemplateBinding Background}"
+                                               BorderBrush="{TemplateBinding BorderBrush}"
+                                               BorderThickness="{TemplateBinding BorderThickness}"
+                                               CornerRadius="0,8,8,0">
+                                            <Path Fill="#666666"
+                                                 HorizontalAlignment="Center"
+                                                 VerticalAlignment="Center"
+                                                 Data="M 0 0 L 4 4 L 8 0 Z"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Border" Property="Background" Value="#F5F5F5"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <!-- Popup for dropdown items -->
+                            <Popup Name="Popup"
+                                  Placement="Bottom"
+                                  IsOpen="{TemplateBinding IsDropDownOpen}"
+                                  AllowsTransparency="True"
+                                  Focusable="False"
+                                  PopupAnimation="Fade">
+                                <Border x:Name="DropDownBorder"
+                                       Background="#FFFFFF"
+                                       BorderBrush="#E0E0E0"
+                                       BorderThickness="1"
+                                       CornerRadius="8"
+                                       Margin="0,2,0,0">
+                                    <ScrollViewer SnapsToDevicePixels="True" MaxHeight="200">
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#999999"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Rounded rectangle button style -->
+        <Style x:Key="RoundedRectButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#2196F3"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Red Remove button style -->
+        <Style x:Key="RemoveButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource RoundedRectButtonStyle}">
+            <Setter Property="Background" Value="#F44336"/>
+        </Style>
+
+        <!-- Cancel button style -->
+        <Style x:Key="CancelButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource RoundedRectButtonStyle}">
+            <Setter Property="Background" Value="#999999"/>
+        </Style>
+    </Window.Resources>
     
     <Grid Margin="20">
         <Grid.RowDefinitions>
@@ -18,15 +154,16 @@
         <TextBlock Grid.Row="0" Text="Add New Device" FontSize="16" FontWeight="Bold" Margin="0,0,0,20" Foreground="#333"/>
 
         <!-- Connection Method Selection -->
-        <Grid Grid.Row="1" Margin="0,0,0,20">
+        <Grid Grid.Row="1" Margin="0,0,0,15">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="150"/>
+                <ColumnDefinition Width="120"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
             <TextBlock Grid.Column="0" Text="Connection Method:" FontWeight="Bold" VerticalAlignment="Center" Foreground="#333"/>
             <ComboBox Grid.Column="1" Name="ConnectionMethodCombo" 
-                     Margin="15,0,0,0" Padding="10,8"
+                     Margin="15,0,0,0"
+                     Style="{StaticResource RoundedRectComboBoxStyle}"
                      SelectionChanged="ConnectionMethod_Changed">
                 <ComboBoxItem Content="Bluetooth (BLE)" Tag="BLE"/>
                 <ComboBoxItem Content="Serial Port (COM)" Tag="SerialPort"/>
@@ -38,29 +175,32 @@
         <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
+                <RowDefinition Height="120"/>
             </Grid.RowDefinitions>
 
-            <TextBlock Grid.Row="0" Name="DeviceListLabel" Text="Available Bluetooth Devices:" FontWeight="Bold" Margin="0,0,0,10" Foreground="#333"/>
-            <ListBox Grid.Row="1" Name="AvailableDevicesList" 
-                    Background="#FFFFFF" BorderBrush="#E0E0E0" Margin="0">
-                <!-- Devices will be populated here -->
-            </ListBox>
+            <TextBlock Grid.Row="0" Name="DeviceListLabel" Text="Available Bluetooth Devices:" FontWeight="Bold" Margin="0,0,0,8" Foreground="#333"/>
+            <Border Grid.Row="1" Background="#FFFFFF" BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Padding="0">
+                <ListBox Name="AvailableDevicesList" Background="Transparent" BorderThickness="0">
+                    <!-- Devices will be populated here -->
+                </ListBox>
+            </Border>
         </Grid>
 
         <!-- Buttons -->
-        <Grid Grid.Row="3" Margin="0,20,0,0">
+        <Grid Grid.Row="3" Margin="0,15,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-                 <Button Grid.Column="1" Name="ConnectButton" Content="Connect" Padding="20,10" Background="#2196F3" Foreground="White" 
-                   FontSize="12" Cursor="Hand" Margin="0,0,10,0"
+            <Button Grid.Column="1" Name="ConnectButton" Content="Connect" Padding="20,8"
+                   Style="{StaticResource RoundedRectButtonStyle}"
+                   Margin="0,0,10,0" FontSize="12"
                    Click="Connect_Click"/>
-            <Button Grid.Column="2" Content="Cancel" Padding="20,10" Background="#999999" Foreground="White" 
-                   FontSize="12" Cursor="Hand"
+            <Button Grid.Column="2" Content="Cancel" Padding="20,8"
+                   Style="{StaticResource CancelButtonStyle}"
+                   FontSize="12"
                    Click="Cancel_Click"/>
         </Grid>
     </Grid>

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,8 +18,12 @@ namespace XPanel.Application
     {
         private DeviceManager _deviceManager;
         private readonly Dictionary<string, ICommunicationChannel> _connectedChannels = new();
+        private readonly Dictionary<string, uint> _channelSessions = new();
         private readonly Dictionary<string, SessionKeepaliveContext> _keepaliveContexts = new();
         private readonly object _channelLock = new();
+        private readonly SemaphoreSlim _shutdownGate = new(1, 1);
+        private Mutex? _singleInstanceMutex;
+        private bool _shutdownCompleted;
 
         public bool RegisterConnectedChannel(string key, ICommunicationChannel channel, uint sessionId, ushort keepaliveMs)
         {
@@ -35,6 +40,7 @@ namespace XPanel.Application
                 }
 
                 _connectedChannels[key] = channel;
+                _channelSessions[key] = sessionId;
             }
 
             StartSessionKeepaliveMonitor(key, channel, sessionId, keepaliveMs);
@@ -103,9 +109,97 @@ namespace XPanel.Application
             lock (_channelLock)
             {
                 _connectedChannels.Remove(key);
+                _channelSessions.Remove(key);
             }
 
             return true;
+        }
+
+        public async Task ShutdownConnectionsAsync()
+        {
+            await _shutdownGate.WaitAsync();
+            try
+            {
+                if (_shutdownCompleted)
+                {
+                    return;
+                }
+
+                await ShutdownAllChannelsGracefullyAsync();
+                _shutdownCompleted = true;
+            }
+            finally
+            {
+                _shutdownGate.Release();
+            }
+        }
+
+        private async Task ShutdownAllChannelsGracefullyAsync()
+        {
+            List<(string Key, ICommunicationChannel Channel, uint? SessionId)> channelsToClose;
+            lock (_channelLock)
+            {
+                channelsToClose = _connectedChannels
+                    .Select(item =>
+                    {
+                        uint? sessionId = _channelSessions.TryGetValue(item.Key, out uint id) ? id : null;
+                        return (item.Key, item.Value, sessionId);
+                    })
+                    .ToList();
+            }
+
+            foreach (var entry in channelsToClose)
+            {
+                StopSessionKeepaliveMonitor(entry.Key);
+
+                if (entry.SessionId.HasValue)
+                {
+                    try
+                    {
+                        bool byeOk = false;
+                        for (int retry = 0; retry < 2 && !byeOk; retry++)
+                        {
+                            byeOk = await SendSessionByeAsync(entry.Channel, entry.SessionId.Value);
+                            if (!byeOk)
+                            {
+                                await Task.Delay(250);
+                            }
+                        }
+
+                        // 给底层传输一点时间完成发送队列冲刷。
+                        await Task.Delay(150);
+                    }
+                    catch
+                    {
+                        // 退出阶段忽略 BYE 失败，继续执行断开和释放。
+                    }
+                }
+
+                try
+                {
+                    await entry.Channel.DisconnectAsync();
+                }
+                catch
+                {
+                    // 退出阶段忽略断开异常。
+                }
+
+                try
+                {
+                    entry.Channel.Dispose();
+                }
+                catch
+                {
+                    // 退出阶段忽略释放异常。
+                }
+            }
+
+            lock (_channelLock)
+            {
+                _connectedChannels.Clear();
+                _channelSessions.Clear();
+                _keepaliveContexts.Clear();
+            }
         }
 
         private void StartSessionKeepaliveMonitor(string key, ICommunicationChannel channel, uint sessionId, ushort keepaliveMs)
@@ -306,6 +400,8 @@ namespace XPanel.Application
         private static async Task<bool> SendSessionByeAsync(ICommunicationChannel channel, uint sessionId)
         {
             var responseTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+
             void OnDataReceived(object? sender, DataReceivedEventArgs args)
             {
                 if (args.Data == null || args.Data.Length == 0)
@@ -321,9 +417,20 @@ namespace XPanel.Application
                         return;
                     }
 
-                    if (frame.MessageType == XpfMessageType.Ack || frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error)
+                    if (XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) && ackForMsgId != msgId)
+                    {
+                        return;
+                    }
+
+                    if (frame.MessageType == XpfMessageType.Ack || frame.MessageType == XpfMessageType.Resp)
                     {
                         responseTcs.TrySetResult(true);
+                        return;
+                    }
+
+                    if (frame.MessageType == XpfMessageType.Error)
+                    {
+                        responseTcs.TrySetResult(false);
                     }
                 }
                 catch
@@ -338,7 +445,6 @@ namespace XPanel.Application
             {
                 await channel.StartReceivingAsync();
 
-                uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
                 var byeFrame = new XpfFrame
                 {
                     MessageType = XpfMessageType.Cmd,
@@ -360,7 +466,7 @@ namespace XPanel.Application
                     return false;
                 }
 
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 using var reg = timeoutCts.Token.Register(() => responseTcs.TrySetResult(false));
                 return await responseTcs.Task;
             }
@@ -372,6 +478,17 @@ namespace XPanel.Application
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            const string singleInstanceMutexName = @"Global\XPanelClient.SingleInstance";
+            _singleInstanceMutex = new Mutex(initiallyOwned: true, singleInstanceMutexName, out bool isFirstInstance);
+            if (!isFirstInstance)
+            {
+                _singleInstanceMutex.Dispose();
+                _singleInstanceMutex = null;
+                MessageBox.Show("XPanelClient is already running on this PC.", "XPanelClient", MessageBoxButton.OK, MessageBoxImage.Information);
+                Shutdown();
+                return;
+            }
+
             base.OnStartup(e);
 
             // 初始化设备管理器
@@ -384,26 +501,50 @@ namespace XPanel.Application
 
         protected override void OnExit(ExitEventArgs e)
         {
-            // 清理资源
-            List<string> keepaliveKeys;
-            lock (_channelLock)
+            try
             {
-                keepaliveKeys = new List<string>(_keepaliveContexts.Keys);
-
-                foreach (var channel in _connectedChannels.Values)
-                {
-                    channel?.Dispose();
-                }
-
-                _connectedChannels.Clear();
+                ShutdownConnectionsAsync().GetAwaiter().GetResult();
             }
-
-            foreach (var key in keepaliveKeys)
+            catch
             {
-                StopSessionKeepaliveMonitor(key);
+                // 兜底清理，避免退出被阻塞。
+                lock (_channelLock)
+                {
+                    foreach (var channel in _connectedChannels.Values)
+                    {
+                        try
+                        {
+                            channel?.Dispose();
+                        }
+                        catch
+                        {
+                            // 忽略异常。
+                        }
+                    }
+
+                    _connectedChannels.Clear();
+                    _channelSessions.Clear();
+                    _keepaliveContexts.Clear();
+                }
             }
 
             _deviceManager?.Dispose();
+
+            if (_singleInstanceMutex != null)
+            {
+                try
+                {
+                    _singleInstanceMutex.ReleaseMutex();
+                }
+                catch
+                {
+                    // Ignore release failure during shutdown.
+                }
+
+                _singleInstanceMutex.Dispose();
+                _singleInstanceMutex = null;
+            }
+
             base.OnExit(e);
         }
 

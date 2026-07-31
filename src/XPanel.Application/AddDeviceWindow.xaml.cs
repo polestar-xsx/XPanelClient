@@ -20,6 +20,8 @@ namespace XPanel.Application
         private readonly BluetoothDeviceManager _bluetoothDeviceManager = new();
         private readonly List<BleDeviceListItem> _bleDeviceItems = new();
         private bool _isConnecting;
+        private CancellationTokenSource? _currentScanCancellationTokenSource;
+        private int _currentBleScanId;
 
         public string ConnectedDeviceName { get; private set; } = string.Empty;
         public string ConnectedMethodDisplay { get; private set; } = string.Empty;
@@ -30,24 +32,47 @@ namespace XPanel.Application
         {
             InitializeComponent();
             Loaded += AddDeviceWindow_Loaded;
-            // 默认选择第一项（蓝牙）
-            ConnectionMethodCombo.SelectedIndex = 0;
         }
 
         private async void AddDeviceWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            await UpdateDeviceListAsync("BLE");
+            try
+            {
+                // 默认选择第一项（蓝牙）
+                ConnectionMethodCombo.SelectedIndex = 0;
+                await UpdateDeviceListAsync("BLE");
+            }
+            catch (Exception ex)
+            {
+                LogBle($"AddDeviceWindow_Loaded error: {ex}");
+                AvailableDevicesList.Items.Clear();
+                AvailableDevicesList.Items.Add($"Error: {ex.Message}");
+            }
         }
 
         private async void ConnectionMethod_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            if (ConnectionMethodCombo.SelectedItem is System.Windows.Controls.ComboBoxItem selectedItem)
+            try
             {
-                string? method = selectedItem.Tag?.ToString();
-                if (method != null)
+                // 取消前一个正在进行的操作（主要是蓝牙扫描）
+                _currentScanCancellationTokenSource?.Cancel();
+                _currentScanCancellationTokenSource?.Dispose();
+                _currentScanCancellationTokenSource = null;
+
+                if (ConnectionMethodCombo.SelectedItem is System.Windows.Controls.ComboBoxItem selectedItem)
                 {
-                    await UpdateDeviceListAsync(method);
+                    string? method = selectedItem.Tag?.ToString();
+                    if (method != null)
+                    {
+                        await UpdateDeviceListAsync(method);
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                LogBle($"ConnectionMethod_Changed error: {ex}");
+                AvailableDevicesList.Items.Clear();
+                AvailableDevicesList.Items.Add($"Error: {ex.Message}");
             }
         }
 
@@ -74,11 +99,26 @@ namespace XPanel.Application
 
         private async Task PopulateBleDevicesAsync()
         {
+            // 为这次扫描分配一个唯一ID
+            _currentBleScanId++;
+            int scanId = _currentBleScanId;
+
+            // 创建新的取消令牌源用于此次扫描
+            _currentScanCancellationTokenSource = new CancellationTokenSource();
+            var cancellationToken = _currentScanCancellationTokenSource.Token;
+
             AvailableDevicesList.Items.Add("Scanning BLE devices...");
 
             try
             {
                 var scannedDevices = await _bluetoothDeviceManager.ScanBleDevicesAsync(TimeSpan.FromSeconds(5));
+                
+                // 检查是否已被取消，或者已经有新的扫描操作启动了
+                if (cancellationToken.IsCancellationRequested || scanId != _currentBleScanId)
+                {
+                    return;
+                }
+
                 var matchedDeviceNames = scannedDevices
                     .Where(d => !string.IsNullOrWhiteSpace(d.DeviceName))
                     .Select(d => new BleDeviceListItem(
@@ -91,6 +131,12 @@ namespace XPanel.Application
                     .ThenBy(item => item.DeviceAddress, StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
+                // 再次检查这是否还是最新的扫描
+                if (scanId != _currentBleScanId)
+                {
+                    return;
+                }
+
                 AvailableDevicesList.Items.Clear();
                 _bleDeviceItems.Clear();
 
@@ -102,27 +148,23 @@ namespace XPanel.Application
 
                 if (AvailableDevicesList.Items.Count == 0)
                 {
-                    var rawNames = scannedDevices
-                        .Select(d => d.DeviceName?.Trim())
-                        .Where(name => !string.IsNullOrWhiteSpace(name))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .Take(8)
-                        .ToList();
-
-                    string rawNamePreview = rawNames.Count == 0
-                        ? "(none)"
-                        : string.Join(", ", rawNames);
-
-                    MessageBox.Show(
-                        $"Scanned {scannedDevices.Length} BLE devices, but none matched rule XPanel-<ID6>.\nRaw names: {rawNamePreview}",
-                        "Scan Result",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Information);
+                    AvailableDevicesList.Items.Add("No devices found");
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // 操作被取消，不做任何操作
             }
             catch (Exception ex)
             {
+                // 检查是否已被取消或已经有新的扫描
+                if (cancellationToken.IsCancellationRequested || scanId != _currentBleScanId)
+                {
+                    return;
+                }
+
                 AvailableDevicesList.Items.Clear();
+                AvailableDevicesList.Items.Add($"Error: {ex.Message}");
                 MessageBox.Show(
                     $"BLE scan failed: {ex.Message}",
                     "Bluetooth Scan Error",
@@ -260,12 +302,6 @@ namespace XPanel.Application
                         throw new InvalidOperationException("该设备已存在活动连接");
                     }
                 }
-
-                MessageBox.Show(
-                    $"Handshake success\nDevice: {selectedBleDevice.DeviceName}\nSessionId: {handshakeResult.SessionId}\nKeepalive: {handshakeResult.KeepaliveMs} ms",
-                    "BLE Connected",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
 
                 ConnectedDeviceName = selectedBleDevice.DeviceName;
                 ConnectedDeviceAddress = selectedBleDevice.DeviceAddress;
@@ -480,6 +516,11 @@ namespace XPanel.Application
 
         protected override void OnClosed(EventArgs e)
         {
+            // 取消任何进行中的扫描
+            _currentScanCancellationTokenSource?.Cancel();
+            _currentScanCancellationTokenSource?.Dispose();
+            _currentScanCancellationTokenSource = null;
+
             _bluetoothDeviceManager.Dispose();
             base.OnClosed(e);
         }

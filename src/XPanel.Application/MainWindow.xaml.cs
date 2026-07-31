@@ -3,6 +3,7 @@ using System.Windows;
 using System.IO;
 using System.Drawing;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,20 +21,169 @@ using XPanel.Core.Protocol;
 namespace XPanel.Application
 {
     /// <summary>
+    /// Synchronization Item Model
+    /// </summary>
+    public class SyncItem
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public bool IsEnabled { get; set; }
+        public string Category { get; set; } = string.Empty;
+        public int Priority { get; set; }
+
+        public SyncItem()
+        {
+            Id = Guid.NewGuid().ToString("N");
+            Priority = 0;
+        }
+
+        public SyncItem(string name, string category, bool isEnabled = false) : this()
+        {
+            Name = name;
+            Category = category;
+            IsEnabled = isEnabled;
+        }
+    }
+
+    /// <summary>
+    /// Sync Item Service - Business Logic Layer
+    /// </summary>
+    public interface ISyncItemProvider
+    {
+        List<SyncItem> GetAllItems();
+        void SaveItems(List<SyncItem> items);
+        void OnItemToggled(SyncItem item);
+    }
+
+    public class SyncItemService : ISyncItemProvider
+    {
+        private static readonly string SyncConfigPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "sync-config.json");
+
+        private List<SyncItem> _syncItems;
+
+        public SyncItemService()
+        {
+            _syncItems = LoadSyncItemsFromConfig();
+            if (_syncItems.Count == 0)
+            {
+                _syncItems = GetDefaultSyncItems();
+            }
+        }
+
+        public List<SyncItem> GetAllItems()
+        {
+            return _syncItems.OrderBy(x => x.Priority).ToList();
+        }
+
+        public void SaveItems(List<SyncItem> items)
+        {
+            _syncItems = items;
+            try
+            {
+                var json = JsonSerializer.Serialize(items, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(SyncConfigPath, json);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to save sync config: {ex.Message}");
+            }
+        }
+
+        public void OnItemToggled(SyncItem item)
+        {
+            // 这是业务逻辑扩展点，可以根据不同的item执行相应的操作
+            switch (item.Category)
+            {
+                case "Time":
+                    HandleTimeSync(item);
+                    break;
+                case "Weather":
+                    HandleWeatherSync(item);
+                    break;
+                case "Teams":
+                    HandleTeamsSync(item);
+                    break;
+                case "Notification":
+                    HandleNotificationSync(item);
+                    break;
+                default:
+                    System.Diagnostics.Debug.WriteLine($"Unknown sync category: {item.Category}");
+                    break;
+            }
+        }
+
+        private void HandleTimeSync(SyncItem item)
+        {
+            System.Diagnostics.Debug.WriteLine($"Time Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
+            // TODO: Implement time sync logic
+        }
+
+        private void HandleWeatherSync(SyncItem item)
+        {
+            System.Diagnostics.Debug.WriteLine($"Weather Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
+            // TODO: Implement weather sync logic
+        }
+
+        private void HandleTeamsSync(SyncItem item)
+        {
+            System.Diagnostics.Debug.WriteLine($"Teams Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
+            // TODO: Implement Teams sync logic
+        }
+
+        private void HandleNotificationSync(SyncItem item)
+        {
+            System.Diagnostics.Debug.WriteLine($"Notification Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
+            // TODO: Implement notification sync logic
+        }
+
+        private List<SyncItem> GetDefaultSyncItems()
+        {
+            return new List<SyncItem>
+            {
+                new SyncItem("时间", "Time", false) { Priority = 0 },
+                new SyncItem("天气", "Weather", false) { Priority = 1 },
+                new SyncItem("Teams", "Teams", false) { Priority = 2 },
+                new SyncItem("系统通知", "Notification", false) { Priority = 3 },
+            };
+        }
+
+        private List<SyncItem> LoadSyncItemsFromConfig()
+        {
+            try
+            {
+                if (File.Exists(SyncConfigPath))
+                {
+                    var json = File.ReadAllText(SyncConfigPath);
+                    var items = JsonSerializer.Deserialize<List<SyncItem>>(json);
+                    return items ?? new List<SyncItem>();
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to load sync config: {ex.Message}");
+            }
+            return new List<SyncItem>();
+        }
+    }
+
+    /// <summary>
     /// MainWindow.xaml 的交互逻辑
     /// </summary>
     public partial class MainWindow : Window
     {
         private static readonly string DeviceConfigPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "XPanelClient",
+            AppContext.BaseDirectory,
             "devices.json");
 
         private WinForms.NotifyIcon _trayIcon;
         private bool _isShuttingDown = false;
         private readonly BluetoothDeviceManager _bluetoothDeviceManager = new();
-        private readonly Dictionary<string, ConnectedDeviceEntry> _connectedDevices = new();
+        private readonly Dictionary<string, ConnectedDeviceEntry> _connectedDevices = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, PersistedDeviceItem> _savedDevices = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ISyncItemProvider _syncItemService = new SyncItemService();
+        private List<SyncItem> _currentSyncItems = new();
 
         public MainWindow()
         {
@@ -51,6 +201,9 @@ namespace XPanel.Application
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             LoadSavedDevicesIntoCache();
+            InitializeDeviceEntriesFromSaved();
+            RefreshConnectedDeviceUi();
+            InitializeSyncItems();
             await AutoConnectSavedDevicesAsync();
             RefreshConnectedDeviceUi();
         }
@@ -119,11 +272,91 @@ namespace XPanel.Application
                 ShowWindow();
         }
 
-        private void ExitApplication()
+        private async void ExitApplication()
         {
             _isShuttingDown = true;
             _trayIcon?.Dispose();
+
+            if (System.Windows.Application.Current is App app)
+            {
+                try
+                {
+                    await app.ShutdownConnectionsAsync();
+                }
+                catch
+                {
+                    // 退出阶段忽略异常，继续关闭进程。
+                }
+            }
+
             System.Windows.Application.Current.Shutdown();
+        }
+
+        private void InitializeSyncItems()
+        {
+            _currentSyncItems = _syncItemService.GetAllItems();
+            RefreshSyncItemsUi();
+        }
+
+        private void RefreshSyncItemsUi()
+        {
+            SyncItemsPanel.Children.Clear();
+
+            foreach (var item in _currentSyncItems)
+            {
+                var rowBorder = new Border
+                {
+                    Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 255, 255)),
+                    BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(224, 224, 224)),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(8),
+                    Margin = new Thickness(0, 0, 0, 10),
+                    Padding = new Thickness(12, 10, 12, 10),
+                };
+
+                var rowGrid = new Grid();
+                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var nameText = new TextBlock
+                {
+                    Text = item.Name,
+                    FontSize = 14,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(51, 51, 51)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(10, 0, 0, 0),
+                };
+                Grid.SetColumn(nameText, 0);
+                rowGrid.Children.Add(nameText);
+
+                var toggleButton = new ToggleButton
+                {
+                    Style = FindResource("ToggleSwitchStyle") as System.Windows.Style,
+                    IsChecked = item.IsEnabled,
+                    Tag = item.Id,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                toggleButton.Checked += (s, e) =>
+                {
+                    HandleSyncItemToggled(item, true);
+                };
+                toggleButton.Unchecked += (s, e) =>
+                {
+                    HandleSyncItemToggled(item, false);
+                };
+                Grid.SetColumn(toggleButton, 1);
+                rowGrid.Children.Add(toggleButton);
+
+                rowBorder.Child = rowGrid;
+                SyncItemsPanel.Children.Add(rowBorder);
+            }
+        }
+
+        private void HandleSyncItemToggled(SyncItem item, bool isEnabled)
+        {
+            item.IsEnabled = isEnabled;
+            _syncItemService.OnItemToggled(item);
+            _syncItemService.SaveItems(_currentSyncItems);
         }
 
         private void UpdateTabContent()
@@ -131,14 +364,20 @@ namespace XPanel.Application
             if (LeftTabControl.SelectedIndex >= 0)
             {
                 // 更新标签页头部文字
-                string[] tabHeaders = { "Device", "Device Control", "System Settings" };
+                string[] tabHeaders = { "Device", "Synchronization", "System Settings" };
                 TabHeader.Text = tabHeaders[LeftTabControl.SelectedIndex];
 
                 // 显示/隐藏对应的内容面板
                 DeviceInfoPanel.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
-                ControlPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+                SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
                 SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
                 AddDeviceBottomButton.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+                // 当切换到Synchronization页面时，刷新UI
+                if (LeftTabControl.SelectedIndex == 1)
+                {
+                    RefreshSyncItemsUi();
+                }
             }
         }
 
@@ -190,7 +429,8 @@ namespace XPanel.Application
                     channelKey,
                     addDeviceWindow.ConnectedDeviceName,
                     normalizedChannel,
-                    addDeviceWindow.ConnectedSessionId);
+                    addDeviceWindow.ConnectedSessionId,
+                    DeviceConnectionVisualState.Connected);
 
                 _savedDevices[channelKey] = new PersistedDeviceItem
                 {
@@ -213,16 +453,16 @@ namespace XPanel.Application
 
             removeButton.IsEnabled = false;
 
-            bool removedFromChannel = false;
-            if (System.Windows.Application.Current is App app)
+            bool removedFromChannel = true;
+            if (_connectedDevices.TryGetValue(channelKey, out var targetDevice) &&
+                targetDevice.Status == DeviceConnectionVisualState.Connected &&
+                targetDevice.SessionId.HasValue)
             {
-                if (!_connectedDevices.TryGetValue(channelKey, out var targetDevice))
+                removedFromChannel = false;
+                if (System.Windows.Application.Current is App app)
                 {
-                    removeButton.IsEnabled = true;
-                    return;
+                    removedFromChannel = await app.DisconnectAndRemoveChannelAsync(channelKey, targetDevice.SessionId.Value);
                 }
-
-                removedFromChannel = await app.DisconnectAndRemoveChannelAsync(channelKey, targetDevice.SessionId);
             }
 
             if (!removedFromChannel)
@@ -256,7 +496,12 @@ namespace XPanel.Application
             NoConnectedDevicesText.Visibility = Visibility.Collapsed;
             ConnectedDevicesPanel.Visibility = Visibility.Visible;
 
-            foreach (var device in _connectedDevices.Values)
+            var orderedDevices = _connectedDevices.Values
+                .OrderBy(d => d.DeviceName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(d => d.ChannelKey, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var device in orderedDevices)
             {
                 var rowBorder = new Border
                 {
@@ -272,17 +517,33 @@ namespace XPanel.Application
                 rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+                var leftGroup = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 10, 0),
+                };
+                Grid.SetColumn(leftGroup, 0);
+
+                leftGroup.Children.Add(new System.Windows.Shapes.Ellipse
+                {
+                    Width = 10,
+                    Height = 10,
+                    Fill = GetStatusBrush(device.Status),
+                    Margin = new Thickness(0, 0, 8, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                });
+
                 var deviceText = new TextBlock
                 {
-                    Text = device.DeviceName,
+                    Text = $"{device.DeviceName} ({device.MethodDisplay})",
                     FontSize = 20,
                     FontWeight = FontWeights.SemiBold,
                     Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(51, 51, 51)),
                     VerticalAlignment = VerticalAlignment.Center,
                     TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 0, 10, 0),
                 };
-                Grid.SetColumn(deviceText, 0);
+                leftGroup.Children.Add(deviceText);
 
                 var removeButton = new System.Windows.Controls.Button
                 {
@@ -298,7 +559,7 @@ namespace XPanel.Application
                 removeButton.Click += RemoveDevice_Click;
                 Grid.SetColumn(removeButton, 1);
 
-                rowGrid.Children.Add(deviceText);
+                rowGrid.Children.Add(leftGroup);
                 rowGrid.Children.Add(removeButton);
                 rowBorder.Child = rowGrid;
                 ConnectedDevicesPanel.Children.Add(rowBorder);
@@ -309,7 +570,7 @@ namespace XPanel.Application
             DeviceStatusGroupPanel.Children.Clear();
 
             int index = 0;
-            foreach (var device in _connectedDevices.Values)
+            foreach (var device in orderedDevices)
             {
                 if (index > 0)
                 {
@@ -333,9 +594,7 @@ namespace XPanel.Application
                 {
                     Width = 10,
                     Height = 10,
-                    Fill = device.IsConnected
-                        ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(76, 175, 80))
-                        : new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54)),
+                    Fill = GetStatusBrush(device.Status),
                     Margin = new Thickness(0, 0, 8, 0),
                     VerticalAlignment = VerticalAlignment.Center,
                 });
@@ -374,6 +633,37 @@ namespace XPanel.Application
             return "BLE";
         }
 
+        private static SolidColorBrush GetStatusBrush(DeviceConnectionVisualState status)
+        {
+            return status switch
+            {
+                DeviceConnectionVisualState.Connected => new SolidColorBrush(System.Windows.Media.Color.FromRgb(76, 175, 80)),
+                DeviceConnectionVisualState.Handshaking => new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 193, 7)),
+                _ => new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54)),
+            };
+        }
+
+        private void InitializeDeviceEntriesFromSaved()
+        {
+            _connectedDevices.Clear();
+
+            foreach (var item in _savedDevices.Values)
+            {
+                string channelLabel = NormalizeChannelLabel(item.Channel);
+                string channelKey = BuildChannelKey(channelLabel, item.DeviceAddress);
+                string displayName = string.IsNullOrWhiteSpace(item.DeviceName)
+                    ? item.DeviceAddress
+                    : item.DeviceName;
+
+                _connectedDevices[channelKey] = new ConnectedDeviceEntry(
+                    channelKey,
+                    displayName,
+                    channelLabel,
+                    SessionId: null,
+                    Status: DeviceConnectionVisualState.Disconnected);
+            }
+        }
+
         private async Task AutoConnectSavedDevicesAsync()
         {
             if (_savedDevices.Count == 0)
@@ -387,8 +677,32 @@ namespace XPanel.Application
                 string channelKey = BuildChannelKey(channelLabel, saved.DeviceAddress);
                 if (string.IsNullOrWhiteSpace(saved.DeviceAddress) || _connectedDevices.ContainsKey(channelKey))
                 {
-                    continue;
+                    if (string.IsNullOrWhiteSpace(saved.DeviceAddress))
+                    {
+                        continue;
+                    }
                 }
+
+                string displayName = string.IsNullOrWhiteSpace(saved.DeviceName)
+                    ? saved.DeviceAddress
+                    : saved.DeviceName;
+
+                if (!_connectedDevices.ContainsKey(channelKey))
+                {
+                    _connectedDevices[channelKey] = new ConnectedDeviceEntry(
+                        channelKey,
+                        displayName,
+                        channelLabel,
+                        SessionId: null,
+                        Status: DeviceConnectionVisualState.Disconnected);
+                }
+
+                _connectedDevices[channelKey] = _connectedDevices[channelKey] with
+                {
+                    Status = DeviceConnectionVisualState.Handshaking,
+                    SessionId = null,
+                };
+                RefreshConnectedDeviceUi();
 
                 try
                 {
@@ -425,23 +739,49 @@ namespace XPanel.Application
                     if (!registered)
                     {
                         SafeDisposeChannel(channel);
+                        _connectedDevices[channelKey] = _connectedDevices[channelKey] with
+                        {
+                            Status = DeviceConnectionVisualState.Disconnected,
+                            SessionId = null,
+                        };
+                        RefreshConnectedDeviceUi();
                         continue;
                     }
 
-                    string displayName = string.IsNullOrWhiteSpace(saved.DeviceName)
-                        ? saved.DeviceAddress
-                        : saved.DeviceName;
+                    if (!_savedDevices.ContainsKey(channelKey))
+                    {
+                        try
+                        {
+                            await app.DisconnectAndRemoveChannelAsync(channelKey, handshake.SessionId);
+                        }
+                        catch
+                        {
+                            SafeDisposeChannel(channel);
+                        }
+
+                        continue;
+                    }
 
                     _connectedDevices[channelKey] = new ConnectedDeviceEntry(
                         channelKey,
                         displayName,
                         channelLabel,
                         handshake.SessionId,
-                        IsConnected: true);
+                        DeviceConnectionVisualState.Connected);
+                    RefreshConnectedDeviceUi();
                 }
                 catch
                 {
                     // 单个设备自动连接失败时继续处理其他设备。
+                    if (_connectedDevices.TryGetValue(channelKey, out var existing))
+                    {
+                        _connectedDevices[channelKey] = existing with
+                        {
+                            Status = DeviceConnectionVisualState.Disconnected,
+                            SessionId = null,
+                        };
+                        RefreshConnectedDeviceUi();
+                    }
                 }
             }
         }
@@ -770,7 +1110,19 @@ namespace XPanel.Application
             }
         }
 
-        private sealed record ConnectedDeviceEntry(string ChannelKey, string DeviceName, string MethodDisplay, uint SessionId, bool IsConnected = true);
+        private sealed record ConnectedDeviceEntry(
+            string ChannelKey,
+            string DeviceName,
+            string MethodDisplay,
+            uint? SessionId,
+            DeviceConnectionVisualState Status);
+
+        private enum DeviceConnectionVisualState
+        {
+            Disconnected = 0,
+            Handshaking = 1,
+            Connected = 2,
+        }
 
         private sealed class PersistedDeviceConfig
         {
