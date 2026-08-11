@@ -1,7 +1,7 @@
-# XPanel 统一通信协议 Draft (V0.3, Binary First)
+# XPanel 统一通信协议 Draft (V0.4, Binary First)
 
 > 状态: Draft
-> 日期: 2026-07-28
+> 日期: 2026-08-08
 > 目标: 定义 XPanel 在 BLE / 串口 / MQTT 等通信方式下统一的二进制 payload 格式，支持可扩展、可靠传输、按 app_id 路由。
 
 ---
@@ -33,12 +33,12 @@
 
 说明:
 - BLE/UART/MQTT 仅负责承载，不改 payload 语义。
-- V0.2 默认二进制。
+- V0.4 默认二进制。
 - JSON 仅作为调试模式（开发阶段可选），不作为量产主通道。
 
 ---
 
-## 3. 二进制消息格式（V0.2）
+## 3. 二进制消息格式（V0.4）
 
 ### 3.1 总体结构
 
@@ -82,7 +82,7 @@ T(1B) + L(2B) + V(L bytes)
 - V 按字段约定解释。
 - 可包含多个 TLV，顺序不敏感。
 
-### 3.4 通用 TLV 类型表（V0.3）
+### 3.4 通用 TLV 类型表（V0.4）
 
 | T(hex) | 名称 | V 类型 | 说明 |
 |---|---|---|---|
@@ -105,7 +105,22 @@ T(1B) + L(2B) + V(L bytes)
 | 0x11 | time_tz_offset_min | int16(two's complement) | 时区偏移分钟（如 UTC+8=480） |
 | 0x12 | time_src | uint8 | 时间来源（1=manual,2=ntp,3=phone） |
 | 0x13 | time_set_mode | uint8 | 设置模式（1=RTC only,2=RTC+system） |
-| 0x20~0x7F | op params | mixed | 业务参数区 |
+| 0x14 | notify_id | uint32 | 通知唯一ID（幂等去重） |
+| 0x15 | notify_title | bytes(UTF-8) | 通知标题 |
+| 0x16 | notify_text | bytes(UTF-8) | 通知正文 |
+| 0x17 | notify_priority | uint8 | 0=low,1=normal,2=high,3=urgent |
+| 0x18 | notify_ttl_ms | uint32 | 通知过期时间 |
+| 0x19 | notify_channel | uint8 | 1=general,2=alarm,3=calendar,4=system |
+| 0x1A | notify_image_mode | uint8 | 0=none,1=ref,2=inline,3=asset_id |
+| 0x1B | notify_image_format | uint8 | 0=auto,1=png,2=jpg,3=jpeg,4=bmp,5=gif,6=webp |
+| 0x1C | notify_image_uri | bytes(UTF-8) | 图片引用地址/路径（ref模式） |
+| 0x1D | notify_image_data | bytes | 图片二进制（inline/chunk） |
+| 0x1E | notify_image_size | uint32 | 图片总大小 |
+| 0x1F | notify_asset_id | uint32 | 图片资源ID（上传后引用） |
+| 0x20 | chunk_index | uint16 | 分片序号（从0开始） |
+| 0x21 | chunk_total | uint16 | 分片总数 |
+| 0x22 | chunk_crc32 | uint32 | 整图CRC32 |
+| 0x30~0x7F | op params | mixed | 业务参数区 |
 | 0xF0~0xFF | vendor ext | bytes | 厂商扩展 |
 
 参数编码约定:
@@ -115,7 +130,7 @@ T(1B) + L(2B) + V(L bytes)
 
 ---
 
-## 4. op_code 与 app_id 路由（V0.2）
+## 4. op_code 与 app_id 路由（V0.4）
 
 ### 4.1 app_id 映射（与现有代码一致）
 
@@ -159,6 +174,10 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0005 | session.keepalive |
 | 0x0010 | app.switch |
 | 0x0020 | notify.push |
+| 0x0021 | notify.asset_begin |
+| 0x0022 | notify.asset_chunk |
+| 0x0023 | notify.asset_end |
+| 0x0024 | notify.cancel |
 | 0x0030 | weather.update |
 | 0x0040 | nvm.write |
 | 0x0041 | nvm.read |
@@ -340,6 +359,10 @@ T(1B) + L(2B) + V(L bytes)
 | 4010 | Handshake Required |
 | 4011 | Invalid Session |
 | 4012 | Session Expired / Keepalive Timeout |
+| 4020 | Unsupported Image Format |
+| 4021 | Image Too Large |
+| 4022 | Image Chunk Error |
+| 4023 | Notify Payload Invalid |
 | 5001 | Internal Error |
 | 5002 | Storage Error |
 | 5003 | Network Error |
@@ -430,6 +453,109 @@ TLV 示例（十六进制）:
 
 说明:
 - `time_unix_sec` 示例值仅示意编码格式，控制端应使用实时计算值。
+
+---
+
+## 11. 通知下发（文本/图片/混合）规范
+
+目标:
+- 控制端可向设备下发“仅文字通知、仅图片通知、文字+图片通知”。
+
+### 11.1 路由与操作
+
+- 推荐路由：`app_id = 101 (NotificationMgr)`
+- 核心操作：`op_code = 0x0020 (notify.push)`
+- 大图上传操作：
+  - `0x0021 notify.asset_begin`
+  - `0x0022 notify.asset_chunk`
+  - `0x0023 notify.asset_end`
+
+### 11.2 notify.push 必填与可选字段
+
+Header 建议:
+- `msg_type = cmd`
+- `flags.need_ack = 1`
+- `qos_level = 1`
+
+TLV:
+- 必填:
+  - `session_id(0x0E)`
+  - `notify_id(0x14)`
+  - `notify_priority(0x17)`
+  - `notify_image_mode(0x1A)`
+- 条件必填:
+  - 文本通知（含混合通知）: `notify_text(0x16)`
+  - 图片引用模式（mode=1）: `notify_image_uri(0x1C)`
+  - 图片内嵌模式（mode=2）: `notify_image_data(0x1D)` + `notify_image_size(0x1E)` + `notify_image_format(0x1B)`
+  - 图片资源模式（mode=3）: `notify_asset_id(0x1F)`
+- 可选:
+  - `notify_title(0x15)`
+  - `notify_ttl_ms(0x18)`
+  - `notify_channel(0x19)`
+
+### 11.3 三种通知载荷模式
+
+1. 仅文字
+- `notify_image_mode=0`
+- `notify_text` 必填
+
+2. 仅图片
+- 引用模式: `notify_image_mode=1` + `notify_image_uri`
+- 内嵌模式: `notify_image_mode=2` + `notify_image_data`
+- 资源模式: `notify_image_mode=3` + `notify_asset_id`
+
+3. 文字+图片
+- 同时携带 `notify_text` 与图片字段（1/2/3 任一图片模式）
+
+### 11.4 图片传输策略（建议）
+
+1. 小图（建议 <= 4KB）
+- 直接使用 `notify.push` + `notify_image_mode=2` + `notify_image_data`
+
+2. 大图（> 4KB）
+- 采用三阶段上传再推送：
+  1) `notify.asset_begin`：声明 `notify_asset_id`、`notify_image_size`、`notify_image_format`、`chunk_total`、`chunk_crc32`
+  2) `notify.asset_chunk`：每包携带 `notify_asset_id`、`chunk_index`、`notify_image_data`
+  3) `notify.asset_end`：请求设备完成组包和校验
+- 上传成功后再发 `notify.push`，使用 `notify_image_mode=3` + `notify_asset_id`
+
+分片建议:
+- 单片 `notify_image_data` 在 UART/BLE 建议 256~1024 字节。
+- `chunk_index` 必须连续，缺片或重复片按 `4022` 处理。
+
+### 11.5 图片格式约束
+
+- `notify_image_format` 仅表示“发送端声明格式”。
+- 设备端最终是否支持，以设备 `get_caps` 返回为准。
+- 不支持格式返回 `4020 Unsupported Image Format`。
+
+### 11.6 ACK/RESP 语义
+
+- ACK: 表示“协议层收包成功”。
+- RESP: 表示“业务层处理结果”（是否入显示队列、图片是否可解码）。
+- 建议 `notify.push` 返回 RESP 中包含:
+  - `ack_for_msg_id`
+  - `notify_id`
+  - 处理结果（可用 `err_code/err_msg` 表达失败原因）
+
+### 11.7 示例：文字+图片引用通知
+
+Header:
+- `app_id=101`
+- `op_code=0x0020`
+
+TLV（示意）:
+
+```text
+0E 00 04 12 34 56 78               // session_id
+14 00 04 00 00 03 E9               // notify_id=1001
+15 00 06 57 65 43 68 61 74         // notify_title="WeChat"
+16 00 0F 4E 65 77 20 6D 65 73 73 61 67 65 21 // notify_text="New message!"
+17 00 01 02                         // notify_priority=high
+1A 00 01 01                         // notify_image_mode=ref
+1B 00 01 01                         // notify_image_format=png
+1C 00 16 2F 64 61 74 61 2F 6E 6F 74 69 66 79 2E 70 6E 67 // /data/notify.png
+```
 
 ---
 

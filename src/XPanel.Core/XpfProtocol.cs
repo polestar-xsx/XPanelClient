@@ -19,10 +19,16 @@ namespace XPanel.Core.Protocol
     {
         public const ushort AppIdProtocolMgr = 106;
         public const ushort AppIdRtcMgr = 107;
+        public const ushort AppIdNotificationMgr = 101;
         public const ushort OpSessionHello = 0x0003;
         public const ushort OpSessionBye = 0x0004;
         public const ushort OpSessionKeepalive = 0x0005;
         public const ushort OpTimeSync = 0x0051;
+        public const ushort OpNotifyPush = 0x0020;
+        public const ushort OpNotifyAssetBegin = 0x0021;
+        public const ushort OpNotifyAssetChunk = 0x0022;
+        public const ushort OpNotifyAssetEnd = 0x0023;
+        public const ushort OpNotifyCancel = 0x0024;
 
         public const byte TlvAckForMsgId = 0x01;
         public const byte TlvEndpointId = 0x06;
@@ -34,6 +40,21 @@ namespace XPanel.Core.Protocol
         public const byte TlvTimeTzOffsetMin = 0x11;
         public const byte TlvTimeSource = 0x12;
         public const byte TlvTimeSetMode = 0x13;
+        public const byte TlvNotifyId = 0x14;
+        public const byte TlvNotifyTitle = 0x15;
+        public const byte TlvNotifyText = 0x16;
+        public const byte TlvNotifyPriority = 0x17;
+        public const byte TlvNotifyTtlMs = 0x18;
+        public const byte TlvNotifyChannel = 0x19;
+        public const byte TlvNotifyImageMode = 0x1A;
+        public const byte TlvNotifyImageFormat = 0x1B;
+        public const byte TlvNotifyImageUri = 0x1C;
+        public const byte TlvNotifyImageData = 0x1D;
+        public const byte TlvNotifyImageSize = 0x1E;
+        public const byte TlvNotifyAssetId = 0x1F;
+        public const byte TlvChunkIndex = 0x20;
+        public const byte TlvChunkTotal = 0x21;
+        public const byte TlvChunkCrc32 = 0x22;
     }
 
     public sealed class XpfFrame

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
@@ -17,9 +18,12 @@ namespace XPanel.Communication.Bluetooth
     public sealed class BleGattCommunicationChannel : ICommunicationChannel
     {
         private const int BleFragmentHeaderSize = 6;
+        private const int DefaultWritePayload = 20;
+        private const int AttHeaderSize = 3;
         private static readonly Guid ServiceUuid = new("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
         private static readonly Guid RxCharacteristicUuid = new("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
         private static readonly Guid TxCharacteristicUuid = new("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
+        private static readonly object _logLock = new();
 
         private readonly ulong _bluetoothAddress;
         private readonly string _addressHex;
@@ -70,7 +74,7 @@ namespace XPanel.Communication.Bluetooth
 
         public event EventHandler<ConnectionStateChangedEventArgs> ConnectionStateChanged;
         public event EventHandler<DataReceivedEventArgs> DataReceived;
-        public event EventHandler<ErrorEventArgs> ErrorOccurred;
+        public event EventHandler<XPanel.Core.Communication.ErrorEventArgs> ErrorOccurred;
 
         public async Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
         {
@@ -124,6 +128,8 @@ namespace XPanel.Communication.Bluetooth
 
                 _rxCharacteristic = rxResult.Characteristics[0];
                 _txCharacteristic = txResult.Characteristics[0];
+
+                WriteBleTransportLog($"[LINK] {ChannelName}: negotiatedWritePayload={GetMaxWritePayload()}B");
 
                 _txCharacteristic.ValueChanged += TxCharacteristic_ValueChanged;
                 var notifyStatus = await AwaitWithTimeout(
@@ -197,6 +203,12 @@ namespace XPanel.Communication.Bluetooth
                 ushort sessionId = _outFragmentSessionId++;
                 int offset = 0;
 
+                // Log frame fragmentation info
+                WriteBleTransportLog(
+                    $"[FRAGMENT] {ChannelName}: sessionId=0x{sessionId:X4}, " +
+                    $"originalSize={data.Length}B, totalFragments={totalFragments}, " +
+                    $"maxFragmentPayload={maxFragmentPayload}B");
+
                 for (byte index = 0; index < totalFragments; index++)
                 {
                     int fragmentPayloadLength = Math.Min(maxFragmentPayload, data.Length - offset);
@@ -208,6 +220,13 @@ namespace XPanel.Communication.Bluetooth
                     packet[4] = (byte)((fragmentPayloadLength >> 8) & 0xFF);
                     packet[5] = (byte)(fragmentPayloadLength & 0xFF);
                     System.Buffer.BlockCopy(data, offset, packet, BleFragmentHeaderSize, fragmentPayloadLength);
+
+                    // Log each fragment packet
+                    string hexPayload = BitConverter.ToString(packet).Replace("-", " ");
+                    WriteBleTransportLog(
+                        $"[FRAGMENT_PKT] {ChannelName}: sessionId=0x{sessionId:X4}, " +
+                        $"index={index}/{totalFragments}, packetSize={packet.Length}B, " +
+                        $"payloadSize={fragmentPayloadLength}B, hex=[{hexPayload}]");
 
                     if (!await WriteChunkAsync(packet))
                     {
@@ -391,8 +410,22 @@ namespace XPanel.Communication.Bluetooth
 
         private int GetMaxWritePayload()
         {
-            // 当前 API 版本下不依赖 MTU 查询，保守使用 20 字节分片。
-            return 20;
+            // ATT 写命令可承载的数据长度约为 MaxPduSize - ATT 头部(3B)。
+            // 若无法获取协商结果，则回退到兼容值 20B。
+            try
+            {
+                var session = _service?.Session;
+                if (session != null && session.MaxPduSize > AttHeaderSize)
+                {
+                    return session.MaxPduSize - AttHeaderSize;
+                }
+            }
+            catch
+            {
+                // 保持兼容回退。
+            }
+
+            return DefaultWritePayload;
         }
 
         private async Task<BluetoothLEDevice> ConnectDeviceWithAddressTypeAsync()
@@ -459,11 +492,37 @@ namespace XPanel.Communication.Bluetooth
 
         private void OnError(Exception ex, string message)
         {
-            ErrorOccurred?.Invoke(this, new ErrorEventArgs
+            ErrorOccurred?.Invoke(this, new XPanel.Core.Communication.ErrorEventArgs
             {
                 Exception = ex,
                 ErrorMessage = message,
             });
+        }
+
+        private static void WriteBleTransportLog(string message)
+        {
+            try
+            {
+                string logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+                if (!Directory.Exists(logDir))
+                {
+                    Directory.CreateDirectory(logDir);
+                }
+
+                string logFileName = $"ble-transport-{DateTime.Now:yyyy-MM-dd}.log";
+                string logFilePath = Path.Combine(logDir, logFileName);
+                
+                string logMessage = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}";
+                
+                lock (_logLock)
+                {
+                    File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+                }
+            }
+            catch
+            {
+                // 日志写入失败不阻断主流程
+            }
         }
 
         public void Dispose()
