@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
@@ -16,14 +17,19 @@ namespace XPanel.Application
     /// </summary>
     public partial class App : System.Windows.Application
     {
+        private const int LocalKeepaliveIntervalMs = 3000;
+        private static readonly TimeSpan SessionRecoveryRetryInterval = TimeSpan.FromSeconds(3);
         private DeviceManager _deviceManager;
         private readonly Dictionary<string, ICommunicationChannel> _connectedChannels = new();
         private readonly Dictionary<string, uint> _channelSessions = new();
         private readonly Dictionary<string, SessionKeepaliveContext> _keepaliveContexts = new();
+        private readonly Dictionary<string, CancellationTokenSource> _sessionRecoveryContexts = new();
         private readonly object _channelLock = new();
         private readonly SemaphoreSlim _shutdownGate = new(1, 1);
         private Mutex? _singleInstanceMutex;
         private bool _shutdownCompleted;
+
+        public event EventHandler<ChannelSessionStateChangedEventArgs>? ChannelSessionStateChanged;
 
         public bool RegisterConnectedChannel(string key, ICommunicationChannel channel, uint sessionId, ushort keepaliveMs)
         {
@@ -44,6 +50,7 @@ namespace XPanel.Application
             }
 
             StartSessionKeepaliveMonitor(key, channel, sessionId, keepaliveMs);
+            RaiseChannelSessionStateChanged(key, ChannelSessionState.Connected, channel, sessionId, keepaliveMs, "Channel registered");
             return true;
         }
 
@@ -71,6 +78,7 @@ namespace XPanel.Application
                 return false;
             }
 
+            StopSessionRecoveryLoop(key);
             StopSessionKeepaliveMonitor(key);
 
             bool byeOk = await SendSessionByeAsync(channel, sessionId);
@@ -111,6 +119,8 @@ namespace XPanel.Application
                 _connectedChannels.Remove(key);
                 _channelSessions.Remove(key);
             }
+
+            RaiseChannelSessionStateChanged(key, ChannelSessionState.Disconnected, channel, null, null, "Channel removed by user");
 
             return true;
         }
@@ -248,12 +258,25 @@ namespace XPanel.Application
                 _connectedChannels.Clear();
                 _channelSessions.Clear();
                 _keepaliveContexts.Clear();
+                foreach (var recoveryCts in _sessionRecoveryContexts.Values)
+                {
+                    try
+                    {
+                        recoveryCts.Cancel();
+                    }
+                    catch
+                    {
+                        // 忽略取消异常。
+                    }
+                }
+
+                _sessionRecoveryContexts.Clear();
             }
         }
 
         private void StartSessionKeepaliveMonitor(string key, ICommunicationChannel channel, uint sessionId, ushort keepaliveMs)
         {
-            int normalizedKeepaliveMs = keepaliveMs <= 0 ? 25000 : keepaliveMs;
+            int normalizedKeepaliveMs = LocalKeepaliveIntervalMs;
 
             StopSessionKeepaliveMonitor(key);
 
@@ -316,12 +339,18 @@ namespace XPanel.Application
                         continue;
                     }
 
-                    if (context.IncrementMisses() >= 3)
-                    {
-                        // 连续丢失保活响应后停止保活任务，等待上层执行重连/重握手。
-                        StopSessionKeepaliveMonitor(context.Key);
-                        break;
-                    }
+                    context.IncrementMisses();
+                    StopSessionKeepaliveMonitor(context.Key);
+                    RaiseChannelSessionStateChanged(
+                        context.Key,
+                        ChannelSessionState.Disconnected,
+                        context.Channel,
+                        null,
+                        null,
+                        "Keepalive ACK timeout");
+
+                    StartSessionRecoveryLoop(context.Key, context.Channel, context.KeepaliveMs);
+                    break;
                 }
             }
             catch (OperationCanceledException)
@@ -362,6 +391,317 @@ namespace XPanel.Application
             }
 
             context.TokenSource.Dispose();
+        }
+
+        private void StartSessionRecoveryLoop(string key, ICommunicationChannel channel, int fallbackKeepaliveMs)
+        {
+            CancellationTokenSource recoveryCts;
+            lock (_channelLock)
+            {
+                if (!_connectedChannels.TryGetValue(key, out var registered) || !ReferenceEquals(registered, channel))
+                {
+                    return;
+                }
+
+                if (_sessionRecoveryContexts.ContainsKey(key))
+                {
+                    return;
+                }
+
+                recoveryCts = new CancellationTokenSource();
+                _sessionRecoveryContexts[key] = recoveryCts;
+            }
+
+            _ = RunSessionRecoveryLoopAsync(key, channel, fallbackKeepaliveMs, recoveryCts.Token);
+        }
+
+        private async Task RunSessionRecoveryLoopAsync(
+            string key,
+            ICommunicationChannel channel,
+            int fallbackKeepaliveMs,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    bool stillRegistered;
+                    lock (_channelLock)
+                    {
+                        stillRegistered = _connectedChannels.TryGetValue(key, out var registered)
+                            && ReferenceEquals(registered, channel);
+                    }
+
+                    if (!stillRegistered)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        try
+                        {
+                            await channel.DisconnectAsync(cancellationToken);
+                        }
+                        catch
+                        {
+                            // 断开失败不阻断后续重连尝试。
+                        }
+
+                        bool connected = await channel.ConnectAsync(cancellationToken);
+                        if (!connected)
+                        {
+                            throw new InvalidOperationException("Reconnect failed");
+                        }
+
+                        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                        handshakeCts.CancelAfter(TimeSpan.FromSeconds(3));
+                        SessionHandshakeResult handshake = await PerformSessionHelloHandshakeAsync(
+                            channel,
+                            endpointId: Environment.MachineName,
+                            keepaliveMs: (ushort)Math.Max(1, fallbackKeepaliveMs),
+                            cancellationToken: handshakeCts.Token);
+
+                        lock (_channelLock)
+                        {
+                            if (!_connectedChannels.TryGetValue(key, out var registered) || !ReferenceEquals(registered, channel))
+                            {
+                                return;
+                            }
+
+                            _channelSessions[key] = handshake.SessionId;
+                        }
+
+                        StartSessionKeepaliveMonitor(key, channel, handshake.SessionId, handshake.KeepaliveMs);
+                        RaiseChannelSessionStateChanged(
+                            key,
+                            ChannelSessionState.Connected,
+                            channel,
+                            handshake.SessionId,
+                            handshake.KeepaliveMs,
+                            "Session recovered");
+                        return;
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch
+                    {
+                        // 按固定周期持续重连重握手。
+                    }
+
+                    await Task.Delay(SessionRecoveryRetryInterval, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 正常取消。
+            }
+            finally
+            {
+                CancellationTokenSource? ctsToDispose = null;
+                lock (_channelLock)
+                {
+                    if (_sessionRecoveryContexts.TryGetValue(key, out var existing) && existing.Token == cancellationToken)
+                    {
+                        ctsToDispose = existing;
+                        _sessionRecoveryContexts.Remove(key);
+                    }
+                }
+
+                ctsToDispose?.Dispose();
+            }
+        }
+
+        private void StopSessionRecoveryLoop(string key)
+        {
+            CancellationTokenSource? cts = null;
+            lock (_channelLock)
+            {
+                if (_sessionRecoveryContexts.TryGetValue(key, out var existing))
+                {
+                    cts = existing;
+                    _sessionRecoveryContexts.Remove(key);
+                }
+            }
+
+            if (cts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                cts.Cancel();
+            }
+            catch
+            {
+                // 忽略取消异常。
+            }
+
+            cts.Dispose();
+        }
+
+        private static async Task<SessionHandshakeResult> PerformSessionHelloHandshakeAsync(
+            ICommunicationChannel channel,
+            string endpointId,
+            ushort keepaliveMs,
+            CancellationToken cancellationToken)
+        {
+            var responseTcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(256);
+
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    if (TryExtractFirstXpfFrame(receiveBuffer, out var frameBytes))
+                    {
+                        responseTcs.TrySetResult(frameBytes);
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+
+            try
+            {
+                await channel.StartReceivingAsync(cancellationToken);
+
+                uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+                uint clientNonce = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+                uint tsSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                var helloFrame = new XpfFrame
+                {
+                    MessageType = XpfMessageType.Cmd,
+                    Flags = 0x01,
+                    QosLevel = 1,
+                    Hop = 0,
+                    AppId = XpfProtocolConstants.AppIdProtocolMgr,
+                    OpCode = XpfProtocolConstants.OpSessionHello,
+                    MsgId = msgId,
+                    TimestampSec = tsSec,
+                };
+
+                helloFrame.Tlvs[XpfProtocolConstants.TlvEndpointId] = XpfCodec.EncodeUtf8(endpointId);
+                helloFrame.Tlvs[XpfProtocolConstants.TlvClientNonce] = XpfCodec.EncodeUInt32(clientNonce);
+                helloFrame.Tlvs[XpfProtocolConstants.TlvKeepaliveMs] = XpfCodec.EncodeUInt16(keepaliveMs);
+
+                bool sent = await channel.SendAsync(XpfCodec.Serialize(helloFrame), cancellationToken);
+                if (!sent)
+                {
+                    throw new InvalidOperationException("HELLO frame 发送失败");
+                }
+
+                using var reg = cancellationToken.Register(() => responseTcs.TrySetCanceled(cancellationToken));
+                byte[] responseBytes = await responseTcs.Task;
+                XpfFrame responseFrame = XpfCodec.Deserialize(responseBytes);
+
+                if (responseFrame.OpCode != XpfProtocolConstants.OpSessionHello)
+                {
+                    throw new InvalidDataException($"收到非 HELLO 响应 op_code: 0x{responseFrame.OpCode:X4}");
+                }
+
+                if (!XpfCodec.TryReadUInt32(responseFrame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) || ackForMsgId != msgId)
+                {
+                    throw new InvalidDataException("HELLO 响应中 ack_for_msg_id 无效");
+                }
+
+                if (responseFrame.MessageType == XpfMessageType.Error)
+                {
+                    throw new InvalidOperationException("设备返回 ERROR 响应");
+                }
+
+                if (!XpfCodec.TryReadUInt32(responseFrame.Tlvs, XpfProtocolConstants.TlvSessionId, out uint sessionId))
+                {
+                    throw new InvalidDataException("HELLO 响应缺少 session_id");
+                }
+
+                ushort negotiatedKeepalive = keepaliveMs;
+                if (XpfCodec.TryReadUInt16(responseFrame.Tlvs, XpfProtocolConstants.TlvKeepaliveMs, out ushort deviceKeepalive))
+                {
+                    negotiatedKeepalive = deviceKeepalive;
+                }
+
+                return new SessionHandshakeResult(sessionId, negotiatedKeepalive);
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
+        }
+
+        private static bool TryExtractFirstXpfFrame(List<byte> buffer, out byte[] frameBytes)
+        {
+            frameBytes = Array.Empty<byte>();
+            const int headerLength = 24;
+
+            if (buffer.Count < headerLength)
+            {
+                return false;
+            }
+
+            int start = -1;
+            for (int i = 0; i <= buffer.Count - 2; i++)
+            {
+                if (buffer[i] == 0x58 && buffer[i + 1] == 0x50)
+                {
+                    start = i;
+                    break;
+                }
+            }
+
+            if (start < 0)
+            {
+                buffer.Clear();
+                return false;
+            }
+
+            if (start > 0)
+            {
+                buffer.RemoveRange(0, start);
+            }
+
+            if (buffer.Count < headerLength)
+            {
+                return false;
+            }
+
+            ushort bodyLen = (ushort)((buffer[20] << 8) | buffer[21]);
+            int frameLen = headerLength + bodyLen;
+            if (buffer.Count < frameLen)
+            {
+                return false;
+            }
+
+            frameBytes = buffer.Take(frameLen).ToArray();
+            buffer.RemoveRange(0, frameLen);
+            return true;
+        }
+
+        private void RaiseChannelSessionStateChanged(
+            string key,
+            ChannelSessionState state,
+            ICommunicationChannel? channel,
+            uint? sessionId,
+            ushort? keepaliveMs,
+            string reason)
+        {
+            ChannelSessionStateChanged?.Invoke(this, new ChannelSessionStateChangedEventArgs(
+                key,
+                state,
+                channel,
+                sessionId,
+                keepaliveMs,
+                reason));
         }
 
         private static async Task<bool> SendSessionKeepaliveAsync(
@@ -671,5 +1011,21 @@ namespace XPanel.Application
                 _consecutiveMisses = 0;
             }
         }
+
+        public enum ChannelSessionState
+        {
+            Disconnected = 0,
+            Connected = 1,
+        }
+
+        public sealed record ChannelSessionStateChangedEventArgs(
+            string Key,
+            ChannelSessionState State,
+            ICommunicationChannel? Channel,
+            uint? SessionId,
+            ushort? KeepaliveMs,
+            string Reason);
+
+        private sealed record SessionHandshakeResult(uint SessionId, ushort KeepaliveMs);
     }
 }

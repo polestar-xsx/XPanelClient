@@ -26,6 +26,7 @@ namespace XPanel.Application
         public string ConnectedDeviceName { get; private set; } = string.Empty;
         public string ConnectedMethodDisplay { get; private set; } = string.Empty;
         public string ConnectedDeviceAddress { get; private set; } = string.Empty;
+        public BleAddressType ConnectedBleAddressType { get; private set; } = BleAddressType.Unknown;
         public uint ConnectedSessionId { get; private set; }
 
         public AddDeviceWindow()
@@ -264,7 +265,7 @@ namespace XPanel.Application
                         handshakeResult = await PerformSessionHelloHandshakeAsync(
                             bleChannel,
                             endpointId: Environment.MachineName,
-                            keepaliveMs: 25000,
+                            keepaliveMs: 3000,
                             cancellationToken: timeoutCts.Token);
                         LogBle($"Handshake success. SessionId={handshakeResult.SessionId}, Keepalive={handshakeResult.KeepaliveMs}");
                     }
@@ -305,6 +306,7 @@ namespace XPanel.Application
 
                 ConnectedDeviceName = selectedBleDevice.DeviceName;
                 ConnectedDeviceAddress = selectedBleDevice.DeviceAddress;
+                ConnectedBleAddressType = selectedBleDevice.AddressType;
                 ConnectedMethodDisplay = "Bluetooth (BLE)";
                 ConnectedSessionId = handshakeResult.SessionId;
                 DialogResult = true;

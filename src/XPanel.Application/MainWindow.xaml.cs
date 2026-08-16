@@ -14,7 +14,9 @@ using System.Threading.Tasks;
 using System.Xml.Linq;
 using Microsoft.Win32;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Text;
 using System.Diagnostics.Eventing.Reader;
 using WinForms = System.Windows.Forms;
 using Windows.ApplicationModel;
@@ -77,7 +79,29 @@ namespace XPanel.Application
         private UserNotificationListener _notificationListener;
         private CancellationTokenSource _notificationListenerCts;
         private Func<string, string, string, string, byte[], uint, Task<bool>> _sendNotificationCallback;
+        private Func<string, bool>? _isNotificationEnabledForDevice;
+        private CancellationTokenSource? _teamsListenerCts;
+        private Func<string, string, string, string, byte[], uint, Task<bool>>? _sendTeamsNotificationCallback;
+        private Func<string, bool>? _isTeamsEnabledForDevice;
+        private byte[]? _teamsIconData;
+        private readonly object _teamsEventLock = new();
+        private string _lastTeamsEventSignature = string.Empty;
+        private DateTime _lastTeamsEventTime = DateTime.MinValue;
+        private WinEventDelegate? _teamsWinEventProc;
+        private readonly List<IntPtr> _teamsWinEventHooks = new();
+        private Thread? _teamsHookThread;
+        private uint _teamsHookThreadId;
+        private volatile bool _teamsHookStarted;
         private dynamic _connectedDevicesRef;
+
+        private const string TeamsAppId = "com.squirrel.Teams.Teams";
+        private const string TeamsDisplayTitle = "Teams";
+        private const uint EVENT_OBJECT_SHOW = 0x8002;
+        private const uint WM_QUIT = 0x0012;
+        private const int OBJID_WINDOW = 0;
+        private const int OBJID_CLIENT = -4;
+        private const uint WINEVENT_OUTOFCONTEXT = 0;
+        private const uint WINEVENT_SKIPOWNPROCESS = 2;
 
         public SyncItemService()
         {
@@ -477,6 +501,12 @@ namespace XPanel.Application
                 return false;
             }
 
+            if (IsLikelyGenericInstallerIcon(iconPath))
+            {
+                detail = $"filtered generic icon:{iconPath}";
+                return false;
+            }
+
             try
             {
                 string ext = Path.GetExtension(iconPath);
@@ -509,6 +539,29 @@ namespace XPanel.Application
                 detail = ex.Message;
                 return false;
             }
+        }
+
+        private static bool IsLikelyGenericInstallerIcon(string iconPath)
+        {
+            string fileName = Path.GetFileName(iconPath) ?? string.Empty;
+            string fullPath = iconPath.ToLowerInvariant();
+
+            if (string.Equals(fileName, "msiexec.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(fileName, "ginstall.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (fullPath.Contains("\\difx\\icons\\", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private static bool TryResolveIconTokenToPath(string token, out string path, out string detail)
@@ -599,49 +652,54 @@ namespace XPanel.Application
                 @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
             };
 
-            foreach (string basePath in uninstallPaths)
+            RegistryKey[] hives = { Registry.CurrentUser, Registry.LocalMachine };
+
+            foreach (var hive in hives)
             {
-                using var key = Registry.LocalMachine.OpenSubKey(basePath);
-                if (key == null)
+                foreach (string basePath in uninstallPaths)
                 {
-                    continue;
-                }
-
-                foreach (string subKeyName in key.GetSubKeyNames())
-                {
-                    using var appKey = key.OpenSubKey(subKeyName);
-                    if (appKey == null)
+                    using var key = hive.OpenSubKey(basePath);
+                    if (key == null)
                     {
                         continue;
                     }
 
-                    object? displayNameObj = appKey.GetValue("DisplayName");
-                    string displayName = displayNameObj?.ToString() ?? string.Empty;
-
-                    if (!MatchesAppId(appId, displayName, subKeyName))
+                    foreach (string subKeyName in key.GetSubKeyNames())
                     {
-                        continue;
-                    }
-
-                    object? displayIconObj = appKey.GetValue("DisplayIcon");
-                    string displayIcon = displayIconObj?.ToString() ?? string.Empty;
-                    if (!string.IsNullOrWhiteSpace(displayIcon))
-                    {
-                        if (TrySaveIconFromPathToken(displayIcon, outputPath, out string iconDetail))
+                        using var appKey = key.OpenSubKey(subKeyName);
+                        if (appKey == null)
                         {
-                            detail = iconDetail;
-                            return true;
+                            continue;
                         }
-                    }
 
-                    object? installLocObj = appKey.GetValue("InstallLocation");
-                    string installLocation = installLocObj?.ToString() ?? string.Empty;
-                    if (!string.IsNullOrWhiteSpace(installLocation))
-                    {
-                        if (TryExtractIconFromInstallLocation(installLocation, outputPath, out string extractDetail))
+                        object? displayNameObj = appKey.GetValue("DisplayName");
+                        string displayName = displayNameObj?.ToString() ?? string.Empty;
+
+                        if (!MatchesAppId(appId, displayName, subKeyName))
                         {
-                            detail = extractDetail;
-                            return true;
+                            continue;
+                        }
+
+                        object? displayIconObj = appKey.GetValue("DisplayIcon");
+                        string displayIcon = displayIconObj?.ToString() ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(displayIcon))
+                        {
+                            if (TrySaveIconFromPathToken(displayIcon, outputPath, out string iconDetail))
+                            {
+                                detail = iconDetail;
+                                return true;
+                            }
+                        }
+
+                        object? installLocObj = appKey.GetValue("InstallLocation");
+                        string installLocation = installLocObj?.ToString() ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(installLocation))
+                        {
+                            if (TryExtractIconFromInstallLocation(installLocation, outputPath, out string extractDetail))
+                            {
+                                detail = extractDetail;
+                                return true;
+                            }
                         }
                     }
                 }
@@ -657,18 +715,87 @@ namespace XPanel.Application
                 return false;
             }
 
-            string normalizedAppId = appId.Replace(".", " ").Replace("_", " ").ToLowerInvariant();
-            string normalizedDisplay = displayName.Replace(".", " ").Replace("_", " ").ToLowerInvariant();
-            string normalizedReg = regKeyName.Replace(".", " ").Replace("_", " ").ToLowerInvariant();
+            string normalizedDisplay = NormalizeText(displayName);
+            string normalizedReg = NormalizeText(regKeyName);
+            string compactDisplay = normalizedDisplay.Replace(" ", string.Empty, StringComparison.Ordinal);
+            string compactReg = normalizedReg.Replace(" ", string.Empty, StringComparison.Ordinal);
 
-            string[] appIdParts = appId.Split(new[] { '.', '_' }, StringSplitOptions.RemoveEmptyEntries);
-            if (appIdParts.Length == 0)
+            var distinctiveTokens = ExtractDistinctiveTokens(appId);
+            if (distinctiveTokens.Count == 0)
             {
                 return false;
             }
 
-            string firstPart = appIdParts[0].ToLowerInvariant();
-            return normalizedDisplay.Contains(firstPart) || normalizedReg.Contains(firstPart);
+            int displayHits = distinctiveTokens.Count(token =>
+                normalizedDisplay.Contains(token, StringComparison.Ordinal) ||
+                compactDisplay.Contains(token, StringComparison.Ordinal));
+            int regHits = distinctiveTokens.Count(token =>
+                normalizedReg.Contains(token, StringComparison.Ordinal) ||
+                compactReg.Contains(token, StringComparison.Ordinal));
+
+            // Keep matching permissive enough for cache preloading, but avoid generic-vendor-only matches.
+            return displayHits > 0 || regHits > 0;
+        }
+
+        private static string NormalizeText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            var chars = value
+                .ToLowerInvariant()
+                .Select(ch => char.IsLetterOrDigit(ch) ? ch : ' ')
+                .ToArray();
+            return new string(chars);
+        }
+
+        private static HashSet<string> ExtractDistinctiveTokens(string appId)
+        {
+            string normalized = NormalizeText(appId);
+            string[] rawTokens = normalized
+                .Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+            var genericTokens = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "microsoft",
+                "windows",
+                "explorer",
+                "notification",
+                "system",
+                "systemtoast",
+                "toast",
+                "app",
+                "stable",
+                "desktop",
+                "exe",
+                "cw5n1h2txyewy",
+                "8wekyb3d8bbwe",
+            };
+
+            var result = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string token in rawTokens)
+            {
+                if (token.Length < 4)
+                {
+                    continue;
+                }
+
+                if (genericTokens.Contains(token))
+                {
+                    continue;
+                }
+
+                if (token.All(char.IsDigit))
+                {
+                    continue;
+                }
+
+                result.Add(token);
+            }
+
+            return result;
         }
 
         private static bool TryExtractIconFromInstallLocation(string installLocation, string outputPath, out string detail)
@@ -875,13 +1002,15 @@ namespace XPanel.Application
 
         public void StartNotificationForwarding(
             dynamic connectedDevices,
-            Func<string, string, string, string, byte[], uint, Task<bool>> sendNotificationCallback)
+            Func<string, string, string, string, byte[], uint, Task<bool>> sendNotificationCallback,
+            Func<string, bool>? isNotificationEnabledForDevice = null)
         {
+            // Stop existing listener before replacing runtime references.
+            StopNotificationForwarding();
+
             _connectedDevicesRef = connectedDevices;
             _sendNotificationCallback = sendNotificationCallback;
-
-            // Stop existing listener if any
-            StopNotificationForwarding();
+            _isNotificationEnabledForDevice = isNotificationEnabledForDevice;
 
             _notificationListenerCts = new CancellationTokenSource();
 
@@ -898,6 +1027,7 @@ namespace XPanel.Application
                 _notificationListenerCts?.Cancel();
                 _notificationListenerCts?.Dispose();
                 _notificationListenerCts = null;
+                _isNotificationEnabledForDevice = null;
             }
             catch (Exception ex)
             {
@@ -905,6 +1035,42 @@ namespace XPanel.Application
             }
 
             System.Diagnostics.Debug.WriteLine("Notification forwarding stopped");
+        }
+
+        public void StartTeamsForwarding(
+            dynamic connectedDevices,
+            Func<string, string, string, string, byte[], uint, Task<bool>> sendNotificationCallback,
+            Func<string, bool>? isTeamsEnabledForDevice = null)
+        {
+            StopTeamsForwarding();
+
+            _connectedDevicesRef = connectedDevices;
+            _sendTeamsNotificationCallback = sendNotificationCallback;
+            _isTeamsEnabledForDevice = isTeamsEnabledForDevice;
+
+            _teamsListenerCts = new CancellationTokenSource();
+            _teamsIconData = LoadTeamsIconData();
+            _ = Task.Run(async () => await ListenForTeamsSignalsAsync(_teamsListenerCts.Token));
+
+            WriteNotificationLog("Teams forwarding started", "TeamsListener");
+        }
+
+        public void StopTeamsForwarding()
+        {
+            try
+            {
+                _teamsListenerCts?.Cancel();
+                _teamsListenerCts?.Dispose();
+                _teamsListenerCts = null;
+                _isTeamsEnabledForDevice = null;
+                StopTeamsHookThread();
+            }
+            catch (Exception ex)
+            {
+                WriteNotificationLog($"Error stopping Teams forwarding: {ex.Message}", "TeamsListener");
+            }
+
+            WriteNotificationLog("Teams forwarding stopped", "TeamsListener");
         }
 
         public static void WriteNotificationLog(string message, string category = "Notification")
@@ -1113,6 +1279,7 @@ namespace XPanel.Application
                             for (int i = 0; i < keysList.Count && i < valuesList.Count; i++)
                             {
                                 var deviceEntry = valuesList[i];
+                                string deviceKey = keysList[i];
                                 // Check if Status == Connected (2)
                                 var statusProp = deviceEntry.GetType().GetProperty("Status");
                                 if (statusProp != null)
@@ -1121,19 +1288,20 @@ namespace XPanel.Application
                                     {
                                         var statusObj = statusProp.GetValue(deviceEntry);
                                         int status = Convert.ToInt32(statusObj);
-                                        if (status == 2) // DeviceConnectionVisualState.Connected = 2
+                                        bool notificationEnabled = _isNotificationEnabledForDevice?.Invoke(deviceKey) ?? true;
+                                        if (status == 2 && notificationEnabled) // DeviceConnectionVisualState.Connected = 2
                                         {
-                                            connectedDevices.Add((keysList[i], deviceEntry));
+                                            connectedDevices.Add((deviceKey, deviceEntry));
                                         }
                                     }
                                     catch (Exception ex)
                                     {
-                                        SyncItemService.WriteNotificationLog($"Error checking device status for {keysList[i]}: {ex.Message}", "Listener");
+                                        SyncItemService.WriteNotificationLog($"Error checking device status for {deviceKey}: {ex.Message}", "Listener");
                                     }
                                 }
                             }
                             
-                            SyncItemService.WriteNotificationLog($"Connected devices (status=Connected): {string.Join(", ", connectedDevices.Select(d => d.key))} ({connectedDevices.Count} of {deviceCount})", "Listener");
+                            SyncItemService.WriteNotificationLog($"Connected devices (status=Connected & NotificationEnabled): {string.Join(", ", connectedDevices.Select(d => d.key))} ({connectedDevices.Count} of {deviceCount})", "Listener");
                             
                             if (connectedDevices.Count > 0)
                             {
@@ -1291,6 +1459,418 @@ namespace XPanel.Application
 
             return null;
         }
+
+        private async Task ListenForTeamsSignalsAsync(CancellationToken cancellationToken)
+        {
+            WriteNotificationLog("=== Teams Listener Started ===", "TeamsListener");
+            try
+            {
+                StartTeamsHookThread(cancellationToken);
+
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    await Task.Delay(500, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                WriteNotificationLog("Teams listener cancelled", "TeamsListener");
+            }
+            catch (Exception ex)
+            {
+                WriteNotificationLog($"Teams listener fatal error: {ex.Message}", "TeamsListener");
+            }
+            finally
+            {
+                StopTeamsHookThread();
+                WriteNotificationLog("=== Teams Listener Stopped ===", "TeamsListener");
+            }
+        }
+
+        private byte[]? LoadTeamsIconData()
+        {
+            string[] candidates =
+            {
+                Path.Combine(AppContext.BaseDirectory, "resources", "Teams.png"),
+                Path.Combine(AppContext.BaseDirectory, "Resources", "Teams.png"),
+            };
+
+            foreach (string path in candidates)
+            {
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        byte[] bytes = File.ReadAllBytes(path);
+                        WriteNotificationLog($"Teams icon loaded: {path} ({bytes.Length} bytes)", "TeamsListener");
+                        return bytes;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    WriteNotificationLog($"Failed to load Teams icon from {path}: {ex.Message}", "TeamsListener");
+                }
+            }
+
+            WriteNotificationLog("Teams icon not found, forwarding without icon", "TeamsListener");
+            return null;
+        }
+
+        private void StartTeamsHookThread(CancellationToken cancellationToken)
+        {
+            _teamsHookThread = new Thread(TeamsHookThreadMain)
+            {
+                IsBackground = true,
+                Name = "TeamsUIHookThread",
+            };
+            _teamsHookThread.SetApartmentState(ApartmentState.STA);
+            _teamsHookThread.Start();
+
+            for (int i = 0; i < 40 && !_teamsHookStarted && !cancellationToken.IsCancellationRequested; i++)
+            {
+                Thread.Sleep(50);
+            }
+
+            if (!_teamsHookStarted)
+            {
+                throw new InvalidOperationException("Teams UI hook thread did not start");
+            }
+
+            WriteNotificationLog("Teams WinEvent hook started", "TeamsListener");
+        }
+
+        private void TeamsHookThreadMain()
+        {
+            try
+            {
+                _teamsHookThreadId = GetCurrentThreadId();
+                _teamsWinEventProc = (hook, evt, hwnd, idObject, idChild, thread, time) =>
+                {
+                    if (hwnd == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    if (idObject != OBJID_WINDOW && idObject != OBJID_CLIENT)
+                    {
+                        return;
+                    }
+
+                    OnTeamsUiEvent(hwnd, evt);
+                };
+
+                RegisterTeamsEventHook(EVENT_OBJECT_SHOW);
+                if (_teamsWinEventHooks.Count == 0)
+                {
+                    throw new InvalidOperationException("No Teams WinEventHook registered");
+                }
+
+                _teamsHookStarted = true;
+
+                MSG msg;
+                while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+                {
+                    TranslateMessage(ref msg);
+                    DispatchMessage(ref msg);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteNotificationLog($"Teams hook thread error: {ex.Message}", "TeamsListener");
+            }
+            finally
+            {
+                foreach (IntPtr hook in _teamsWinEventHooks)
+                {
+                    try
+                    {
+                        UnhookWinEvent(hook);
+                    }
+                    catch
+                    {
+                        // Ignore hook cleanup errors.
+                    }
+                }
+
+                _teamsWinEventHooks.Clear();
+                _teamsHookStarted = false;
+                _teamsHookThreadId = 0;
+            }
+        }
+
+        private void RegisterTeamsEventHook(uint evt)
+        {
+            if (_teamsWinEventProc == null)
+            {
+                return;
+            }
+
+            IntPtr handle = SetWinEventHook(
+                evt,
+                evt,
+                IntPtr.Zero,
+                _teamsWinEventProc,
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+            if (handle != IntPtr.Zero)
+            {
+                _teamsWinEventHooks.Add(handle);
+            }
+        }
+
+        private void StopTeamsHookThread()
+        {
+            if (_teamsHookThreadId != 0)
+            {
+                try
+                {
+                    PostThreadMessage(_teamsHookThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+                }
+                catch
+                {
+                    // Ignore quit message failures.
+                }
+            }
+
+            if (_teamsHookThread != null)
+            {
+                try
+                {
+                    _teamsHookThread.Join(1500);
+                }
+                catch
+                {
+                    // Ignore thread join failures.
+                }
+                finally
+                {
+                    _teamsHookThread = null;
+                }
+            }
+        }
+
+        private void OnTeamsUiEvent(IntPtr hwnd, uint evt)
+        {
+            try
+            {
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid == 0)
+                {
+                    return;
+                }
+
+                System.Diagnostics.Process proc;
+                try
+                {
+                    proc = System.Diagnostics.Process.GetProcessById((int)pid);
+                }
+                catch
+                {
+                    return;
+                }
+
+                if (!string.Equals(proc.ProcessName, "ms-teams", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                string windowTitle = GetWindowTitle(hwnd);
+                string className = GetWindowClassName(hwnd);
+                EmitTeamsSignal(proc.ProcessName, className, windowTitle, evt);
+            }
+            catch (Exception ex)
+            {
+                WriteNotificationLog($"OnTeamsUiEvent error: {ex.Message}", "TeamsListener");
+            }
+        }
+
+        private void EmitTeamsSignal(string processName, string className, string windowTitle, uint evt)
+        {
+            if (!string.Equals(processName, "ms-teams", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string safeTitle = string.IsNullOrWhiteSpace(windowTitle) ? "(no-title)" : windowTitle;
+            string safeClass = string.IsNullOrWhiteSpace(className) ? "(no-class)" : className;
+            string signature = processName + "|" + safeClass + "|" + safeTitle + "|" + evt;
+
+            lock (_teamsEventLock)
+            {
+                if (signature == _lastTeamsEventSignature && (DateTime.Now - _lastTeamsEventTime).TotalSeconds < 2)
+                {
+                    return;
+                }
+
+                _lastTeamsEventSignature = signature;
+                _lastTeamsEventTime = DateTime.Now;
+            }
+
+            string messageText = string.IsNullOrWhiteSpace(windowTitle)
+                ? "New Teams notification"
+                : windowTitle.Trim();
+
+            WriteNotificationLog($"Teams signal captured: class={safeClass}, title={safeTitle}", "TeamsListener");
+            _ = ForwardTeamsNotificationAsync(messageText);
+        }
+
+        private async Task ForwardTeamsNotificationAsync(string messageText)
+        {
+            try
+            {
+                if (_connectedDevicesRef == null || _sendTeamsNotificationCallback == null)
+                {
+                    return;
+                }
+
+                var keysProp = _connectedDevicesRef.GetType().GetProperty("Keys");
+                var valuesProp = _connectedDevicesRef.GetType().GetProperty("Values");
+                var keys = keysProp?.GetValue(_connectedDevicesRef) as dynamic;
+                var values = valuesProp?.GetValue(_connectedDevicesRef) as dynamic;
+                if (keys == null || values == null)
+                {
+                    return;
+                }
+
+                var keysList = ((System.Collections.IEnumerable)keys).Cast<string>().ToList();
+                var valuesList = ((System.Collections.IEnumerable)values).Cast<dynamic>().ToList();
+
+                var enabledDeviceKeys = new List<string>();
+                for (int i = 0; i < keysList.Count && i < valuesList.Count; i++)
+                {
+                    string deviceKey = keysList[i];
+                    var entry = valuesList[i];
+                    var statusProp = entry.GetType().GetProperty("Status");
+                    if (statusProp == null)
+                    {
+                        continue;
+                    }
+
+                    int status;
+                    try
+                    {
+                        status = Convert.ToInt32(statusProp.GetValue(entry));
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    bool teamsEnabled = _isTeamsEnabledForDevice?.Invoke(deviceKey) ?? true;
+                    if (status == 2 && teamsEnabled)
+                    {
+                        enabledDeviceKeys.Add(deviceKey);
+                    }
+                }
+
+                if (enabledDeviceKeys.Count == 0)
+                {
+                    WriteNotificationLog("No connected devices with Teams sync enabled", "TeamsListener");
+                    return;
+                }
+
+                uint notifyId = (uint)$"{TeamsAppId}_{DateTime.UtcNow.Ticks}".GetHashCode();
+                byte[] iconData = _teamsIconData ?? Array.Empty<byte>();
+
+                foreach (string deviceKey in enabledDeviceKeys)
+                {
+                    await _sendTeamsNotificationCallback(
+                        deviceKey,
+                        TeamsAppId,
+                        TeamsDisplayTitle,
+                        messageText,
+                        iconData,
+                        notifyId);
+                }
+
+                WriteNotificationLog($"Teams notification forwarded to {enabledDeviceKeys.Count} device(s)", "TeamsListener");
+            }
+            catch (Exception ex)
+            {
+                WriteNotificationLog($"ForwardTeamsNotificationAsync error: {ex.Message}", "TeamsListener");
+            }
+        }
+
+        private static string GetWindowTitle(IntPtr hwnd)
+        {
+            var sb = new StringBuilder(512);
+            GetWindowText(hwnd, sb, sb.Capacity);
+            return sb.ToString().Trim();
+        }
+
+        private static string GetWindowClassName(IntPtr hwnd)
+        {
+            var sb = new StringBuilder(256);
+            GetClassName(hwnd, sb, sb.Capacity);
+            return sb.ToString().Trim();
+        }
+
+        private delegate void WinEventDelegate(
+            IntPtr hWinEventHook,
+            uint eventType,
+            IntPtr hwnd,
+            int idObject,
+            int idChild,
+            uint dwEventThread,
+            uint dwmsEventTime);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public UIntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public POINT pt;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetWinEventHook(
+            uint eventMin,
+            uint eventMax,
+            IntPtr hmodWinEventProc,
+            WinEventDelegate lpfnWinEventProc,
+            uint idProcess,
+            uint idThread,
+            uint dwFlags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+        [DllImport("user32.dll")]
+        private static extern sbyte GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+        [DllImport("user32.dll")]
+        private static extern bool TranslateMessage([In] ref MSG lpMsg);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessage([In] ref MSG lpmsg);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostThreadMessage(uint idThread, uint Msg, UIntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     }
 
     /// <summary>
@@ -1357,6 +1937,11 @@ namespace XPanel.Application
             LeftTabControl.SelectionChanged += (s, e) => UpdateTabContent();
             Loaded += MainWindow_Loaded;
 
+            if (System.Windows.Application.Current is App app)
+            {
+                app.ChannelSessionStateChanged += App_ChannelSessionStateChanged;
+            }
+
             // 托盘隐藏启动时，保证自动连接逻辑也会立即执行。
             _ = RunStartupBootstrapAsync();
         }
@@ -1374,6 +1959,7 @@ namespace XPanel.Application
             }
 
             _startupBootstrapTriggered = true;
+            WriteAppLog("Startup bootstrap begin", "Startup");
 
             LoadSavedDevicesIntoCache();
             InitializeDeviceEntriesFromSaved();
@@ -1381,6 +1967,9 @@ namespace XPanel.Application
             InitializeSyncItems();
             await AutoConnectSavedDevicesAsync();
             RefreshConnectedDeviceUi();
+
+            int connectedCount = _connectedDevices.Values.Count(d => d.Status == DeviceConnectionVisualState.Connected);
+            WriteAppLog($"Startup bootstrap done. saved={_savedDevices.Count}, connected={connectedCount}", "Startup");
         }
 
         private void InitializeTrayIcon()
@@ -1520,7 +2109,11 @@ namespace XPanel.Application
                     _selectedDeviceSyncItems = new List<SyncItem>();
                     foreach (var defaultItem in _currentSyncItems)
                     {
-                        _selectedDeviceSyncItems.Add(new SyncItem(defaultItem.Name, defaultItem.Category, defaultItem.IsEnabled) { Priority = defaultItem.Priority });
+                        _selectedDeviceSyncItems.Add(new SyncItem(defaultItem.Name, defaultItem.Category, defaultItem.IsEnabled)
+                        {
+                            Id = defaultItem.Id,
+                            Priority = defaultItem.Priority,
+                        });
                     }
                     device.SyncConfig = _selectedDeviceSyncItems;
                 }
@@ -1585,6 +2178,18 @@ namespace XPanel.Application
             item.IsEnabled = isEnabled;
             _syncItemService.OnItemToggled(item);
 
+            if (string.Equals(item.Category, "Notification", StringComparison.OrdinalIgnoreCase))
+            {
+                // Service layer currently only records the toggle; runtime start/stop is handled here.
+                HandleNotificationSync(item);
+            }
+
+            if (string.Equals(item.Category, "Teams", StringComparison.OrdinalIgnoreCase))
+            {
+                // Service layer currently only records the toggle; runtime start/stop is handled here.
+                HandleTeamsSync(item);
+            }
+
             // 保存到当前选择的设备配置
             if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var device))
             {
@@ -1647,10 +2252,54 @@ namespace XPanel.Application
 
         protected override void OnClosed(System.EventArgs e)
         {
+            if (System.Windows.Application.Current is App app)
+            {
+                app.ChannelSessionStateChanged -= App_ChannelSessionStateChanged;
+            }
+
             StopAllTimeSyncSchedules();
+            ((SyncItemService)_syncItemService).StopNotificationForwarding();
+            ((SyncItemService)_syncItemService).StopTeamsForwarding();
             _trayIcon?.Dispose();
             _bluetoothDeviceManager.Dispose();
             base.OnClosed(e);
+        }
+
+        private void App_ChannelSessionStateChanged(object? sender, App.ChannelSessionStateChangedEventArgs e)
+        {
+            _ = Dispatcher.InvokeAsync(() =>
+            {
+                if (!_connectedDevices.TryGetValue(e.Key, out var existing))
+                {
+                    return;
+                }
+
+                if (e.State == App.ChannelSessionState.Disconnected)
+                {
+                    StopTimeSyncSchedule(e.Key);
+                    _connectedDevices[e.Key] = existing with
+                    {
+                        Status = DeviceConnectionVisualState.Disconnected,
+                        SessionId = null,
+                    };
+                    UpdateNotificationForwardingState("channel-disconnected");
+                    UpdateTeamsForwardingState("channel-disconnected");
+                    RefreshConnectedDeviceUi();
+                    return;
+                }
+
+                _connectedDevices[e.Key] = existing with
+                {
+                    Status = DeviceConnectionVisualState.Connected,
+                    SessionId = e.SessionId,
+                    CommunicationChannel = e.Channel ?? existing.CommunicationChannel,
+                };
+
+                EnsureTimeSyncScheduleForDevice(e.Key);
+                UpdateNotificationForwardingState("channel-connected");
+                UpdateTeamsForwardingState("channel-connected");
+                RefreshConnectedDeviceUi();
+            });
         }
 
         private void AddDevice_Click(object sender, RoutedEventArgs e)
@@ -1682,7 +2331,11 @@ namespace XPanel.Application
                 var syncConfig = new List<SyncItem>();
                 foreach (var item in _currentSyncItems)
                 {
-                    syncConfig.Add(new SyncItem(item.Name, item.Category, item.IsEnabled) { Priority = item.Priority });
+                    syncConfig.Add(new SyncItem(item.Name, item.Category, item.IsEnabled)
+                    {
+                        Id = item.Id,
+                        Priority = item.Priority,
+                    });
                 }
 
                 _savedDevices[channelKey] = new PersistedDeviceItem
@@ -1690,8 +2343,13 @@ namespace XPanel.Application
                     DeviceName = addDeviceWindow.ConnectedDeviceName,
                     DeviceAddress = address,
                     Channel = normalizedChannel,
+                    BleAddressType = normalizedChannel == "BLE"
+                        ? addDeviceWindow.ConnectedBleAddressType.ToString()
+                        : BleAddressType.Unknown.ToString(),
                     SyncConfig = syncConfig,
                 };
+
+                WriteAppLog($"Manual add device success: key={channelKey}, name={addDeviceWindow.ConnectedDeviceName}, addr={address}", "Device");
 
                 EnsureTimeSyncScheduleForDevice(channelKey);
 
@@ -1738,6 +2396,8 @@ namespace XPanel.Application
 
             _connectedDevices.Remove(channelKey);
             _savedDevices.Remove(channelKey);
+            UpdateNotificationForwardingState("device-removed");
+            UpdateTeamsForwardingState("device-removed");
             RefreshConnectedDeviceUi();
             SaveSavedDevicesToConfig();
         }
@@ -1746,37 +2406,38 @@ namespace XPanel.Application
         {
             try
             {
-                WriteAppLog($"Checking notification config for device: {channelKey}", "AutoNotification");
+                WriteAppLog($"Checking sync config for device: {channelKey}", "AutoSync");
                 
                 if (deviceConfig?.SyncConfig == null || deviceConfig.SyncConfig.Count == 0)
                 {
-                    WriteAppLog($"No sync config found for device: {channelKey}", "AutoNotification");
+                    WriteAppLog($"No sync config found for device: {channelKey}", "AutoSync");
                     return;
                 }
 
                 // Find notification sync item
                 var notificationConfig = deviceConfig.SyncConfig.FirstOrDefault(x => x.Category == "Notification");
-                if (notificationConfig == null)
+                if (notificationConfig != null)
                 {
-                    WriteAppLog($"Notification config not found for device: {channelKey}", "AutoNotification");
-                    return;
+                    WriteAppLog($"Notification config found: IsEnabled={notificationConfig.IsEnabled}, DeviceKey={channelKey}", "AutoNotification");
+
+                    if (notificationConfig.IsEnabled)
+                    {
+                        WriteAppLog($"Auto-starting notification forwarding for device: {channelKey}", "AutoNotification");
+                        UpdateNotificationForwardingState("auto-start");
+                        await ((SyncItemService)_syncItemService).CacheNotificationAppIconsAsync();
+                        WriteAppLog($"Notification forwarding auto-started for device: {channelKey}", "AutoNotification");
+                    }
                 }
 
-                WriteAppLog($"Notification config found: IsEnabled={notificationConfig.IsEnabled}, DeviceKey={channelKey}", "AutoNotification");
-
-                if (notificationConfig.IsEnabled)
+                var teamsConfig = deviceConfig.SyncConfig.FirstOrDefault(x => x.Category == "Teams");
+                if (teamsConfig != null)
                 {
-                    WriteAppLog($"Auto-starting notification forwarding for device: {channelKey}", "AutoNotification");
-                    
-                    // Start notification forwarding
-                    ((SyncItemService)_syncItemService).StartNotificationForwarding(
-                        connectedDevices: _connectedDevices,
-                        sendNotificationCallback: SendNotificationToDeviceAsync);
-
-                    // Cache icons
-                    await ((SyncItemService)_syncItemService).CacheNotificationAppIconsAsync();
-                    
-                    WriteAppLog($"Notification forwarding auto-started for device: {channelKey}", "AutoNotification");
+                    WriteAppLog($"Teams config found: IsEnabled={teamsConfig.IsEnabled}, DeviceKey={channelKey}", "AutoTeams");
+                    if (teamsConfig.IsEnabled)
+                    {
+                        WriteAppLog($"Auto-starting Teams forwarding for device: {channelKey}", "AutoTeams");
+                        UpdateTeamsForwardingState("auto-start");
+                    }
                 }
             }
             catch (Exception ex)
@@ -1789,24 +2450,85 @@ namespace XPanel.Application
         {
             System.Diagnostics.Debug.WriteLine($"Notification Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
             WriteAppLog($"HandleNotificationSync called: IsEnabled={item.IsEnabled}, Connected devices={_connectedDevices.Count}", "NotificationSync");
-            
-            if (!item.IsEnabled)
+
+            UpdateNotificationForwardingState("ui-toggle");
+
+            if (item.IsEnabled)
             {
-                // Stop notification forwarding
-                WriteAppLog("Stopping notification forwarding", "NotificationSync");
+                WriteAppLog("Starting icon cache update", "NotificationSync");
+                _ = ((SyncItemService)_syncItemService).CacheNotificationAppIconsAsync();
+            }
+        }
+
+        private void HandleTeamsSync(SyncItem item)
+        {
+            System.Diagnostics.Debug.WriteLine($"Teams Sync: {item.Name} - {(item.IsEnabled ? "Enabled" : "Disabled")}");
+            WriteAppLog($"HandleTeamsSync called: IsEnabled={item.IsEnabled}, Connected devices={_connectedDevices.Count}", "TeamsSync");
+            UpdateTeamsForwardingState("ui-toggle");
+        }
+
+        private bool IsNotificationSyncEnabledForDevice(string channelKey)
+        {
+            if (!_savedDevices.TryGetValue(channelKey, out var device) || device.SyncConfig == null)
+            {
+                return false;
+            }
+
+            return device.SyncConfig.Any(item =>
+                string.Equals(item.Category, "Notification", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private bool IsTeamsSyncEnabledForDevice(string channelKey)
+        {
+            if (!_savedDevices.TryGetValue(channelKey, out var device) || device.SyncConfig == null)
+            {
+                return false;
+            }
+
+            return device.SyncConfig.Any(item =>
+                string.Equals(item.Category, "Teams", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private void UpdateNotificationForwardingState(string reason)
+        {
+            int enabledConnectedCount = _connectedDevices.Values.Count(device =>
+                device.Status == DeviceConnectionVisualState.Connected &&
+                device.SessionId.HasValue &&
+                IsNotificationSyncEnabledForDevice(device.ChannelKey));
+
+            if (enabledConnectedCount <= 0)
+            {
+                WriteAppLog($"Stopping notification forwarding (reason={reason}, enabledConnectedDevices=0)", "NotificationSync");
                 ((SyncItemService)_syncItemService).StopNotificationForwarding();
                 return;
             }
 
-            // Start notification forwarding to connected devices
-            WriteAppLog($"Starting notification forwarding to {_connectedDevices.Count} device(s)", "NotificationSync");
+            WriteAppLog($"Starting notification forwarding (reason={reason}, enabledConnectedDevices={enabledConnectedCount})", "NotificationSync");
             ((SyncItemService)_syncItemService).StartNotificationForwarding(
                 connectedDevices: _connectedDevices,
-                sendNotificationCallback: SendNotificationToDeviceAsync);
-            
-            // Also cache icons for reference
-            WriteAppLog("Starting icon cache update", "NotificationSync");
-            _ = ((SyncItemService)_syncItemService).CacheNotificationAppIconsAsync();
+                sendNotificationCallback: SendNotificationToDeviceAsync,
+                isNotificationEnabledForDevice: IsNotificationSyncEnabledForDevice);
+        }
+
+        private void UpdateTeamsForwardingState(string reason)
+        {
+            int enabledConnectedCount = _connectedDevices.Values.Count(device =>
+                device.Status == DeviceConnectionVisualState.Connected &&
+                device.SessionId.HasValue &&
+                IsTeamsSyncEnabledForDevice(device.ChannelKey));
+
+            if (enabledConnectedCount <= 0)
+            {
+                WriteAppLog($"Stopping Teams forwarding (reason={reason}, enabledConnectedDevices=0)", "TeamsSync");
+                ((SyncItemService)_syncItemService).StopTeamsForwarding();
+                return;
+            }
+
+            WriteAppLog($"Starting Teams forwarding (reason={reason}, enabledConnectedDevices={enabledConnectedCount})", "TeamsSync");
+            ((SyncItemService)_syncItemService).StartTeamsForwarding(
+                connectedDevices: _connectedDevices,
+                sendNotificationCallback: SendNotificationToDeviceAsync,
+                isTeamsEnabledForDevice: IsTeamsSyncEnabledForDevice);
         }
 
         /// <summary>
@@ -2104,24 +2826,94 @@ namespace XPanel.Application
         {
             if (_savedDevices.Count == 0)
             {
+                WriteAppLog("Auto-connect skipped: no saved devices", "AutoConnect");
                 return;
             }
 
-            foreach (var saved in _savedDevices.Values)
+            WriteAppLog($"Auto-connect begin. saved={_savedDevices.Count}", "AutoConnect");
+
+            bool hasSavedDeviceMutation = false;
+            int successCount = 0;
+            int failedCount = 0;
+
+            foreach (var saved in _savedDevices.Values.ToList())
             {
                 string channelLabel = NormalizeChannelLabel(saved.Channel);
-                string channelKey = BuildChannelKey(channelLabel, saved.DeviceAddress);
-                if (string.IsNullOrWhiteSpace(saved.DeviceAddress) || _connectedDevices.ContainsKey(channelKey))
-                {
-                    if (string.IsNullOrWhiteSpace(saved.DeviceAddress))
-                    {
-                        continue;
-                    }
-                }
-
+                string originalChannelKey = BuildChannelKey(channelLabel, saved.DeviceAddress);
+                string channelKey = originalChannelKey;
                 string displayName = string.IsNullOrWhiteSpace(saved.DeviceName)
                     ? saved.DeviceAddress
                     : saved.DeviceName;
+
+                WriteAppLog($"Auto-connect device: key={channelKey}, name={displayName}, channel={channelLabel}, addrType={saved.BleAddressType}", "AutoConnect");
+
+                if (channelLabel == "BLE")
+                {
+                    var resolved = await ResolveBleReconnectCandidateAsync(saved);
+                    if (resolved != null)
+                    {
+                        string resolvedAddress = resolved.Value.DeviceAddress.Trim();
+                        string resolvedType = resolved.Value.AddressType.ToString();
+                        string resolvedName = resolved.Value.DeviceName?.Trim() ?? string.Empty;
+
+                        if (!string.Equals(saved.DeviceAddress, resolvedAddress, StringComparison.OrdinalIgnoreCase))
+                        {
+                            WriteAppLog($"BLE address remap: {saved.DeviceAddress} -> {resolvedAddress} ({displayName})", "AutoConnect");
+                            saved.DeviceAddress = resolvedAddress;
+                            hasSavedDeviceMutation = true;
+                        }
+
+                        if (!string.Equals(saved.BleAddressType, resolvedType, StringComparison.OrdinalIgnoreCase))
+                        {
+                            saved.BleAddressType = resolvedType;
+                            hasSavedDeviceMutation = true;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(resolvedName) &&
+                            !string.Equals(saved.DeviceName, resolvedName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            saved.DeviceName = resolvedName;
+                            hasSavedDeviceMutation = true;
+                            displayName = resolvedName;
+                        }
+
+                        channelKey = BuildChannelKey(channelLabel, saved.DeviceAddress);
+                    }
+                    else
+                    {
+                        WriteAppLog($"BLE resolve miss, fallback to saved address: {saved.DeviceAddress} ({displayName})", "AutoConnect");
+                    }
+                }
+
+                if (!string.Equals(channelKey, originalChannelKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    _savedDevices.Remove(originalChannelKey);
+                    if (_savedDevices.ContainsKey(channelKey))
+                    {
+                        WriteAppLog($"Auto-connect key collision after remap: {channelKey}", "AutoConnect");
+                    }
+                    else
+                    {
+                        _savedDevices[channelKey] = saved;
+                    }
+
+                    if (_connectedDevices.TryGetValue(originalChannelKey, out var oldEntry))
+                    {
+                        _connectedDevices.Remove(originalChannelKey);
+                        _connectedDevices[channelKey] = oldEntry with
+                        {
+                            ChannelKey = channelKey,
+                            DeviceName = displayName,
+                            MethodDisplay = channelLabel,
+                        };
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(saved.DeviceAddress))
+                {
+                    WriteAppLog($"Skip auto-connect: empty address ({displayName})", "AutoConnect");
+                    continue;
+                }
 
                 if (!_connectedDevices.ContainsKey(channelKey))
                 {
@@ -2144,6 +2936,7 @@ namespace XPanel.Application
                 try
                 {
                     using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                    WriteAppLog($"Connecting transport: key={channelKey}, addr={saved.DeviceAddress}, addrType={saved.BleAddressType}", "AutoConnect");
                     ICommunicationChannel channel = await ConnectBySavedChannelAsync(saved, timeoutCts.Token);
 
                     SessionHandshakeResult handshake;
@@ -2152,7 +2945,7 @@ namespace XPanel.Application
                         handshake = await PerformSessionHelloHandshakeAsync(
                             channel,
                             endpointId: Environment.MachineName,
-                            keepaliveMs: 25000,
+                            keepaliveMs: 3000,
                             cancellationToken: timeoutCts.Token);
                     }
                     catch
@@ -2181,22 +2974,17 @@ namespace XPanel.Application
                             Status = DeviceConnectionVisualState.Disconnected,
                             SessionId = null,
                         };
+                        WriteAppLog($"RegisterConnectedChannel rejected: key={channelKey}", "AutoConnect");
                         RefreshConnectedDeviceUi();
+                        failedCount++;
                         continue;
                     }
 
-                    if (!_savedDevices.ContainsKey(channelKey))
+                    if (_savedDevices.TryGetValue(channelKey, out var persisted))
                     {
-                        try
-                        {
-                            await app.DisconnectAndRemoveChannelAsync(channelKey, handshake.SessionId);
-                        }
-                        catch
-                        {
-                            SafeDisposeChannel(channel);
-                        }
-
-                        continue;
+                        persisted.DeviceAddress = saved.DeviceAddress;
+                        persisted.BleAddressType = saved.BleAddressType;
+                        persisted.Channel = channelLabel;
                     }
 
                     _connectedDevices[channelKey] = new ConnectedDeviceEntry(
@@ -2207,14 +2995,19 @@ namespace XPanel.Application
                         DeviceConnectionVisualState.Connected,
                         channel);
                     EnsureTimeSyncScheduleForDevice(channelKey);
-                    
+
+                    WriteAppLog($"Auto-connect success: key={channelKey}, session={handshake.SessionId}", "AutoConnect");
+                    successCount++;
+
                     // Check device config and start notification forwarding if enabled
                     await TryAutoStartNotificationForwardingAsync(channelKey, saved);
-                    
+
                     RefreshConnectedDeviceUi();
                 }
-                catch
+                catch (Exception ex)
                 {
+                    failedCount++;
+                    WriteAppLog($"Auto-connect failed: key={channelKey}, reason={ex.Message}", "AutoConnect");
                     // 单个设备自动连接失败时继续处理其他设备。
                     if (_connectedDevices.TryGetValue(channelKey, out var existing))
                     {
@@ -2228,6 +3021,14 @@ namespace XPanel.Application
                     }
                 }
             }
+
+            if (hasSavedDeviceMutation)
+            {
+                SaveSavedDevicesToConfig();
+                WriteAppLog("Auto-connect updated saved records (name/address/addressType)", "AutoConnect");
+            }
+
+            WriteAppLog($"Auto-connect done. success={successCount}, failed={failedCount}", "AutoConnect");
         }
 
         private async Task<ICommunicationChannel> ConnectBySavedChannelAsync(PersistedDeviceItem saved, CancellationToken cancellationToken)
@@ -2237,11 +3038,64 @@ namespace XPanel.Application
             {
                 "BLE" => await _bluetoothDeviceManager.ConnectBleDeviceAsync(
                     saved.DeviceAddress,
-                    BleAddressType.Unknown),
+                    ParseBleAddressType(saved.BleAddressType)),
                 "UART" => await ConnectUartChannelAsync(saved.DeviceAddress, cancellationToken),
                 "ETH" => await ConnectEthChannelAsync(saved.DeviceAddress, cancellationToken),
                 _ => throw new InvalidOperationException($"Unsupported channel: {saved.Channel}"),
             };
+        }
+
+        private async Task<(string DeviceAddress, BleAddressType AddressType, string DeviceName)?> ResolveBleReconnectCandidateAsync(PersistedDeviceItem saved)
+        {
+            try
+            {
+                var scanned = await _bluetoothDeviceManager.ScanBleDevicesAsync(TimeSpan.FromSeconds(4));
+                WriteAppLog($"BLE scan for reconnect: name={saved.DeviceName}, address={saved.DeviceAddress}, found={scanned.Length}", "AutoConnect");
+
+                string savedName = saved.DeviceName?.Trim() ?? string.Empty;
+                string savedAddress = saved.DeviceAddress?.Trim() ?? string.Empty;
+
+                if (!string.IsNullOrWhiteSpace(savedName))
+                {
+                    var byName = scanned
+                        .Where(d => !string.IsNullOrWhiteSpace(d.DeviceName) &&
+                            string.Equals(d.DeviceName.Trim(), savedName, StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(d => string.Equals(d.DeviceAddress, savedAddress, StringComparison.OrdinalIgnoreCase))
+                        .ThenByDescending(d => d.SignalStrength)
+                        .FirstOrDefault();
+
+                    if (byName != null)
+                    {
+                        return (byName.DeviceAddress, byName.AddressType, byName.DeviceName);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(savedAddress))
+                {
+                    var byAddress = scanned.FirstOrDefault(d =>
+                        string.Equals(d.DeviceAddress, savedAddress, StringComparison.OrdinalIgnoreCase));
+                    if (byAddress != null)
+                    {
+                        return (byAddress.DeviceAddress, byAddress.AddressType, byAddress.DeviceName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"BLE resolve scan failed: {ex.Message}", "AutoConnect");
+            }
+
+            return null;
+        }
+
+        private static BleAddressType ParseBleAddressType(string raw)
+        {
+            if (Enum.TryParse(raw, true, out BleAddressType parsed))
+            {
+                return parsed;
+            }
+
+            return BleAddressType.Unknown;
         }
 
         private static async Task<ICommunicationChannel> ConnectUartChannelAsync(string portName, CancellationToken cancellationToken)
@@ -2621,6 +3475,7 @@ namespace XPanel.Application
             {
                 if (!File.Exists(DeviceConfigPath))
                 {
+                    WriteAppLog($"Saved device config not found: {DeviceConfigPath}", "AutoConnect");
                     return;
                 }
 
@@ -2651,13 +3506,19 @@ namespace XPanel.Application
                         DeviceName = device.DeviceName,
                         DeviceAddress = device.DeviceAddress,
                         Channel = channel,
+                        BleAddressType = string.IsNullOrWhiteSpace(device.BleAddressType)
+                            ? BleAddressType.Unknown.ToString()
+                            : device.BleAddressType,
                         SyncConfig = device.SyncConfig ?? new List<SyncItem>(),
                     };
                 }
+
+                WriteAppLog($"Loaded saved devices: {_savedDevices.Count}", "AutoConnect");
             }
-            catch
+            catch (Exception ex)
             {
                 _savedDevices.Clear();
+                WriteAppLog($"Load saved devices failed: {ex.Message}", "AutoConnect");
             }
         }
 
@@ -2679,6 +3540,9 @@ namespace XPanel.Application
                             DeviceName = d.DeviceName,
                             DeviceAddress = d.DeviceAddress,
                             Channel = NormalizeChannelLabel(d.Channel),
+                            BleAddressType = string.IsNullOrWhiteSpace(d.BleAddressType)
+                                ? BleAddressType.Unknown.ToString()
+                                : d.BleAddressType,
                             SyncConfig = d.SyncConfig,
                         })
                         .Where(d => !string.IsNullOrWhiteSpace(d.DeviceAddress))
@@ -2723,6 +3587,7 @@ namespace XPanel.Application
             public string DeviceName { get; set; } = string.Empty;
             public string DeviceAddress { get; set; } = string.Empty;
             public string Channel { get; set; } = "BLE";
+            public string BleAddressType { get; set; } = "Unknown";
             public List<SyncItem> SyncConfig { get; set; } = new();
         }
 
