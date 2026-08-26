@@ -120,6 +120,13 @@ T(1B) + L(2B) + V(L bytes)
 | 0x20 | chunk_index | uint16 | 分片序号（从0开始） |
 | 0x21 | chunk_total | uint16 | 分片总数 |
 | 0x22 | chunk_crc32 | uint32 | 整图CRC32 |
+| 0x23 | cfg_scope | uint8 | 配置作用域（1=device_nvm,2=controller_cfg） |
+| 0x24 | cfg_count | uint8 | 本帧配置项数量 |
+| 0x25 | cfg_id | uint16 | 统一配置ID |
+| 0x26 | cfg_value_type | uint8 | 1=bool,2=int32,3=float32,4=utf8,5=bytes |
+| 0x27 | cfg_value | bytes | 配置值（二进制） |
+| 0x28 | cfg_item_status | uint8 | 单项状态（0=ok,1=not_found,2=invalid,3=denied,4=failed） |
+| 0x29 | cfg_flags | uint8 | bit0:masked, bit1:readonly |
 | 0x30~0x7F | op params | mixed | 业务参数区 |
 | 0xF0~0xFF | vendor ext | bytes | 厂商扩展 |
 
@@ -162,6 +169,7 @@ T(1B) + L(2B) + V(L bytes)
 | 105 | BLEMgr |
 | 106 | ProtocolMgr（未来） |
 | 107 | RTCMgr（建议） |
+| 108 | DisplayMgr（截图/显示服务） |
 
 ### 4.3 op_code 建议表（MVP）
 
@@ -185,6 +193,9 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0051 | time.sync |
 | 0x0052 | time.query |
 | 0x0060 | radio.play |
+| 0x0070 | display.screenshot |
+| 0x0071 | display.shot_chunk |
+| 0x0072 | display.shot_end |
 | 0x00F0 | system.reboot |
 
 ---
@@ -363,9 +374,16 @@ T(1B) + L(2B) + V(L bytes)
 | 4021 | Image Too Large |
 | 4022 | Image Chunk Error |
 | 4023 | Notify Payload Invalid |
+| 4030 | Config Not Found |
+| 4031 | Config Type Mismatch |
+| 4032 | Config Access Denied |
+| 4040 | Screenshot Busy（上一次截图未完成） |
+| 4041 | Unsupported Shot Format |
+| 4042 | Shot Chunk Error（缺片/重复/超时） |
 | 5001 | Internal Error |
 | 5002 | Storage Error |
 | 5003 | Network Error |
+| 5004 | Framebuffer Unavailable（画布未初始化） |
 
 ---
 
@@ -559,6 +577,454 @@ TLV（示意）:
 
 ---
 
+## 12. 天气同步（控制端 <-> 设备）规范
+
+目标:
+- 让控制端可通过现有 `weather.update` 指令同步天气数据/城市设置，且字段可直接映射当前固件 `WeatherData` 与 `WeatherScene` 的显示逻辑。
+
+与当前实现对齐结论:
+- 当前 `WeatherScene` 数据来源是 `NetworkMgr::getWeatherData()`，不是直接读 `WeatherApp` 私有状态。
+- 因此天气同步建议路由到 `app_id=100 (NetworkMgr)`，由服务层落库并发布通知给 UI。
+
+### 12.1 路由与操作
+
+- Header 建议:
+  - `msg_type = cmd`
+  - `flags.need_ack = 1`
+  - `qos_level = 1`
+  - `app_id = 100 (NetworkMgr)`
+  - `op_code = 0x0030 (weather.update)`
+- TLV 必填:
+  - `session_id(0x0E)`
+  - `wx_mode(0x30)`
+
+`wx_mode` 定义:
+- `1 = weather_data_sync`：同步天气数据（当前天气 + 未来两天）
+- `2 = weather_location_sync`：同步省市（对应 `submitWeatherLocation`）
+- `3 = weather_refresh_now`：触发立即刷新（等价 `requestWeatherUpdate(true)`）
+
+### 12.2 wx_mode=1（天气数据同步）字段
+
+字段编号使用 `0x31~0x3F`（均属于协议定义的 op params 区间）。
+
+| TLV | 名称 | 类型 | 约束 | 对应当前固件字段 |
+|---|---|---|---|---|
+| 0x31 | wx_valid | uint8 | 0/1 | `WeatherData.valid` |
+| 0x32 | wx_has_temp | uint8 | 0/1 | `WeatherData.hasTemperature` |
+| 0x33 | wx_has_code | uint8 | 0/1 | `WeatherData.hasWeatherCode` |
+| 0x34 | wx_city | bytes(UTF-8) | 建议 <=23B | `WeatherData.city[24]` |
+| 0x35 | wx_temp_c_x10 | int16 | 温度*10，支持负温 | `WeatherData.temperatureC` |
+| 0x36 | wx_code | uint8 | 0~255 | `WeatherData.weatherCode` |
+| 0x37 | wx_future_count | uint8 | 0~2 | `WeatherData.futureDayCount` |
+| 0x38 | wx_day1_min_c_x10 | int16 | 仅 count>=1 时必填 | `futureDays[0].tempMinC` |
+| 0x39 | wx_day1_max_c_x10 | int16 | 仅 count>=1 时必填 | `futureDays[0].tempMaxC` |
+| 0x3A | wx_day1_code | uint8 | 仅 count>=1 时必填 | `futureDays[0].weatherCode` |
+| 0x3B | wx_day2_min_c_x10 | int16 | 仅 count>=2 时必填 | `futureDays[1].tempMinC` |
+| 0x3C | wx_day2_max_c_x10 | int16 | 仅 count>=2 时必填 | `futureDays[1].tempMaxC` |
+| 0x3D | wx_day2_code | uint8 | 仅 count>=2 时必填 | `futureDays[1].weatherCode` |
+| 0x3E | wx_update_unix_sec | uint32 | 可选 | 设备可转为本地 `updateMs` |
+| 0x3F | wx_error_code | uint16 | 可选 | 可映射 `lastError` |
+
+编码约定:
+- `int16` 使用 Big Endian two's complement。
+- 温度按 `x10` 定点编码，设备端转换: `temperatureC = value / 10.0f`。
+
+### 12.3 wx_mode=2（省市同步）字段
+
+用于同步天气查询地点（与现有 `submitWeatherLocation(province, city)` 对齐）。
+
+| TLV | 名称 | 类型 | 约束 |
+|---|---|---|---|
+| 0x40 | wx_province | bytes(UTF-8) | 必填，trim 后非空 |
+| 0x41 | wx_city_name | bytes(UTF-8) | 必填，trim 后非空 |
+
+行为建议:
+- 设备端成功写入后，仅返回 RESP 成功；是否立即拉取天气由控制端显式再发 `wx_mode=3` 决定。
+
+### 12.4 wx_mode=3（立即刷新）
+
+- 无附加业务 TLV（除 `session_id` 与 `wx_mode`）。
+- 设备收到后触发一次天气拉取流程。
+
+### 12.5 响应语义
+
+成功:
+- `msg_type=resp`
+- TLV 至少包含 `ack_for_msg_id(0x01)`。
+- 可选回包字段:
+  - `wx_mode(0x30)`：回显执行模式
+  - `wx_valid(0x31)`、`wx_city(0x34)`：用于确认当前生效状态
+
+失败:
+- `msg_type=error`
+- TLV: `ack_for_msg_id(0x01)` + `err_code(0x07)` + 可选 `err_msg(0x08)`
+
+推荐错误场景:
+- `4001 Bad Request`：字段缺失、长度错误、`wx_future_count > 2`
+- `4010 Handshake Required`：未建会话
+- `4011 Invalid Session`：`session_id` 缺失或不匹配
+- `5003 Network Error`：`wx_mode=3` 触发刷新失败
+
+### 12.6 与 WeatherScene 显示逻辑的一致性要求
+
+- `wx_valid=1` 且 `wx_has_code=1` 时，WeatherScene 才进入“有效天气”渲染。
+- `wx_has_temp=0` 时，图标仍可显示，但温度文本应隐藏（与当前实现一致）。
+- `wx_future_count` 超过 2 的部分必须丢弃（当前 UI 仅显示未来两天）。
+
+### 12.7 wx_mode=1 TLV 示例（3天数据）
+
+场景:
+- 城市: 北京
+- 当前: 26.3C, code=2
+- 未来1: 22.0/30.0, code=3
+- 未来2: 21.0/28.0, code=61
+
+```text
+0E 00 04 12 34 56 78   // session_id
+30 00 01 01            // wx_mode=1 (weather_data_sync)
+31 00 01 01            // wx_valid=1
+32 00 01 01            // wx_has_temp=1
+33 00 01 01            // wx_has_code=1
+34 00 06 E5 8C 97 E4 BA AC // wx_city="北京"
+35 00 02 01 07         // wx_temp_c_x10 = 263
+36 00 01 02            // wx_code=2
+37 00 01 02            // wx_future_count=2
+38 00 02 00 DC         // day1 min = 220
+39 00 02 01 2C         // day1 max = 300
+3A 00 01 03            // day1 code=3
+3B 00 02 00 D2         // day2 min = 210
+3C 00 02 01 18         // day2 max = 280
+3D 00 01 3D            // day2 code=61
+```
+
+---
+
+## 13. 统一配置同步 Case（通用配置读写）
+
+目标:
+- 提供一个跨应用可复用的配置访问格式，既支持“请求对方配置”，也支持“主动下发并要求保存”。
+- 本节可覆盖天气城市配置读取，也可扩展到其他设备/控制端配置。
+
+设计原则:
+- 复用现有 `op_code`，避免新增指令导致当前实现枚举不一致。
+- 使用统一 `cfg_id` 抽象底层 `namespace + key`，控制端无需硬编码存储细节。
+
+### 13.1 操作与方向
+
+1. 请求读取配置（Pull）
+- `op_code = 0x0041 (nvm.read)`
+- `msg_type = cmd`
+- 请求方携带若干 `cfg_id`，响应方返回对应 `cfg_value`。
+
+2. 主动下发保存配置（Push/Set）
+- `op_code = 0x0040 (nvm.write)`
+- `msg_type = cmd`
+- 发送方携带 `cfg_id + cfg_value`，接收方按规则保存并返回逐项状态。
+
+3. 双向通用
+- 方向不固定，设备与控制端都可作为请求方/响应方。
+- 通过 `cfg_scope(0x23)` 区分“写入哪一侧配置空间”。
+
+### 13.2 帧字段规范
+
+Header 建议:
+- `flags.need_ack = 1`
+- `qos_level = 1`
+- `app_id = 102 (NvmMgr)`（推荐）
+
+TLV:
+- 必填:
+  - `session_id(0x0E)`
+  - `cfg_scope(0x23)`
+  - `cfg_count(0x24)`
+- 读请求（0x0041）每项至少:
+  - `cfg_id(0x25)`
+- 写请求（0x0040）每项至少:
+  - `cfg_id(0x25)` + `cfg_value_type(0x26)` + `cfg_value(0x27)`
+
+多项编码顺序（推荐）:
+- 按项连续编码，每项保持固定三元组顺序：
+  - 读: `cfg_id`
+  - 写: `cfg_id -> cfg_value_type -> cfg_value`
+
+响应编码（resp）:
+- 每项返回:
+  - `cfg_id(0x25)`
+  - `cfg_item_status(0x28)`
+  - 成功读到值时附加 `cfg_value_type(0x26)` + `cfg_value(0x27)`
+  - 敏感字段掩码返回时附加 `cfg_flags(0x29, bit0=1)`
+
+### 13.3 统一配置 ID 定义（基于当前已落地 NVM）
+
+来源:
+- `NetworkMgr` 当前使用 namespace: `wifi_cfg`
+- `TetrisApp` 当前使用 namespace: `tetris`
+
+| cfg_id | 语义名 | namespace.key | 类型 | 访问建议 |
+|---:|---|---|---|---|
+| 0x0001 | wifi.configured | `wifi_cfg.configured` | bool | read/write |
+| 0x0002 | wifi.ssid | `wifi_cfg.ssid` | utf8 | read/write |
+| 0x0003 | wifi.password | `wifi_cfg.pass` | utf8 | write-only（读建议掩码或拒绝） |
+| 0x0004 | weather.province | `wifi_cfg.province` | utf8 | read/write |
+| 0x0005 | weather.city | `wifi_cfg.city` | utf8 | read/write |
+| 0x0006 | weather.cache_blob | `wifi_cfg.wx_cache` | bytes | read/write（调试/迁移用途） |
+| 0x0101 | tetris.state_blob | `tetris.state` | bytes | read/write |
+
+说明:
+- 本表只纳入当前代码中已存在的持久化项，后续新增配置项应继续扩展 `cfg_id` 表。
+- `weather.city` 即控制端需要读取的设备天气城市配置。
+
+### 13.4 天气城市读取推荐流程
+
+控制端读取设备天气配置（省/市）:
+1. 发送 `nvm.read`，`cfg_scope=1 (device_nvm)`，`cfg_count=2`
+2. 请求项: `cfg_id=0x0004`（province）和 `cfg_id=0x0005`（city）
+3. 设备返回 resp，逐项附带 `cfg_value_type=utf8` 与 `cfg_value`
+
+控制端下发并保存天气配置:
+1. 发送 `nvm.write`，`cfg_scope=1`，`cfg_count=2`
+2. 写入项: `0x0004=省`，`0x0005=市`
+3. 设备返回逐项 `cfg_item_status=0` 代表保存成功
+
+### 13.5 与错误码关系
+
+- 全局失败可返回 `msg_type=error` + `err_code`
+- 部分成功建议返回 `msg_type=resp`，并用每项 `cfg_item_status` 表达细粒度结果
+
+推荐映射:
+- `4030 Config Not Found`：请求了未实现的 `cfg_id`
+- `4031 Config Type Mismatch`：`cfg_value_type` 与目标配置类型不匹配
+- `4032 Config Access Denied`：访问受限（如读取 `wifi.password` 明文）
+- `5002 Storage Error`：底层 NVM 读写失败
+
+### 13.6 读天气城市示例（nvm.read）
+
+```text
+0E 00 04 12 34 56 78   // session_id
+23 00 01 01            // cfg_scope = device_nvm
+24 00 01 02            // cfg_count = 2
+25 00 02 00 04         // cfg_id = weather.province
+25 00 02 00 05         // cfg_id = weather.city
+```
+
+### 13.7 写天气城市示例（nvm.write）
+
+```text
+0E 00 04 12 34 56 78   // session_id
+23 00 01 01            // cfg_scope = device_nvm
+24 00 01 02            // cfg_count = 2
+
+25 00 02 00 04         // cfg_id = weather.province
+26 00 01 04            // cfg_value_type = utf8
+27 00 06 E5 B9 BF E4 B8 9C // cfg_value = "广东"
+
+25 00 02 00 05         // cfg_id = weather.city
+26 00 01 04            // cfg_value_type = utf8
+27 00 06 E6 B7 B1 E5 9C B3 // cfg_value = "深圳"
+```
+
+---
+
+## 14. 屏幕截图（Screenshot）规范
+
+目标:
+- 控制端发起一次截图请求，设备端把当前显示画布（framebuffer）完整回传给控制端。
+- 明确像素排列方式，使控制端可以直接按行重建图像。
+
+### 14.1 路由与操作
+
+- `app_id = 108 (DisplayMgr)`
+- 操作:
+  - `0x0070 display.screenshot`：控制端请求截图 / 设备返回截图元信息
+  - `0x0071 display.shot_chunk`：设备回传像素数据分片
+  - `0x0072 display.shot_end`：设备声明本次截图传输结束
+
+方向说明:
+- `0x0070` 为 `cmd`（控制端 -> 设备），设备回 `resp`（元信息）或 `error`。
+- `0x0071` / `0x0072` 由设备发起，`msg_type = event`。
+
+### 14.2 截图 TLV 类型表（0x50~0x5F）
+
+| T(hex) | 名称 | V 类型 | 说明 |
+|---|---|---|---|
+| 0x50 | shot_format | uint8 | 1=RGB888, 2=RGB565_BE, 3=RGB565_LE |
+| 0x51 | shot_width | uint16 | 画布宽度（像素） |
+| 0x52 | shot_height | uint16 | 画布高度（像素） |
+| 0x53 | shot_pixel_order | uint8 | 像素排列方式，见 14.4 |
+| 0x54 | shot_bytes_per_pixel | uint8 | 每像素字节数（3 或 2） |
+| 0x55 | shot_total_size | uint32 | 像素数据总字节数 |
+| 0x56 | shot_frame_id | uint32 | 本次截图会话 ID（设备生成，用于分片归属） |
+| 0x57 | shot_data | bytes | 像素数据分片内容 |
+| 0x58 | shot_chunk_size | uint16 | 建议/实际单片数据长度 |
+| 0x59 | shot_brightness | uint8 | 面板全局亮度（0~255），仅信息，未叠加到像素值 |
+
+分片复用通用 TLV:
+- `chunk_index(0x20)`：分片序号，从 0 开始连续递增
+- `chunk_total(0x21)`：分片总数
+- `chunk_crc32(0x22)`：完整像素数据的 CRC32
+
+### 14.3 请求包（control -> device）
+
+Header:
+- `msg_type = cmd`
+- `app_id = 108`
+- `op_code = 0x0070`
+- `flags.need_ack = 1`
+- `qos_level = 1`
+
+TLV:
+- 必填 `session_id(0x0E)`
+- 可选 `shot_format(0x50)`：不填默认 `1 (RGB888)`
+- 可选 `shot_chunk_size(0x58)`：控制端建议单片大小，设备会按链路 MTU 夹紧
+- 可选 `req_id(0x0A)`
+
+### 14.4 像素排列定义（与当前固件实现对齐）
+
+设备内部画布（`dot2d::Renderer::_dotCanvas`）按硬件走线顺序存储，索引由 `dotOrder()` 决定：
+
+```text
+physical_index = (PANEL_HEIGHT - 1 - y) * PANEL_WIDTH + x
+```
+
+该顺序是硬件相关的，**不作为协议格式**。设备在发送前必须转换为逻辑顺序。
+
+协议规定 `shot_pixel_order` 取值:
+
+| 值 | 含义 |
+|---:|---|
+| 1 | row_major_top_left：逐行扫描，原点在左上角，x 向右递增，y 向下递增 |
+| 2 | row_major_bottom_left：逐行扫描，原点在左下角（即设备物理存储序，仅调试用） |
+
+默认且推荐值为 `1`。控制端重建索引:
+
+```text
+byte_offset = (y * shot_width + x) * shot_bytes_per_pixel
+```
+
+像素字节编码:
+
+- `shot_format = 1 (RGB888)`，`shot_bytes_per_pixel = 3`
+  - 字节顺序: `R, G, B`（各 1 字节，来源为 `DTRGB.r/.g/.b`）
+- `shot_format = 2 (RGB565_BE)`，`shot_bytes_per_pixel = 2`
+  - `value = ((R>>3)<<11) | ((G>>2)<<5) | (B>>3)`，Big Endian 两字节
+- `shot_format = 3 (RGB565_LE)`，`shot_bytes_per_pixel = 2`
+  - 同上，Little Endian 两字节
+
+当前固件画布参数:
+- `shot_width = 32`（`PANEL_WIDTH`）
+- `shot_height = 32`（`PANEL_HEIGHT`）
+- RGB888 下 `shot_total_size = 32 * 32 * 3 = 3072` 字节
+
+色彩说明:
+- 像素值为渲染层原始颜色，不含面板全局亮度（`kDisplayBrightness`，当前 125）与 HUB75 驱动的伽马处理。
+- 控制端如需与实机观感一致，可自行按 `shot_brightness / 255` 线性缩放。
+
+### 14.5 响应包（device -> control，元信息）
+
+- `msg_type = resp`
+- `op_code = 0x0070`
+- TLV:
+  - `ack_for_msg_id(0x01)`
+  - `shot_frame_id(0x56)`
+  - `shot_format(0x50)`
+  - `shot_width(0x51)`、`shot_height(0x52)`
+  - `shot_pixel_order(0x53)`
+  - `shot_bytes_per_pixel(0x54)`
+  - `shot_total_size(0x55)`
+  - `chunk_total(0x21)`
+  - `chunk_crc32(0x22)`
+  - 可选 `shot_chunk_size(0x58)`、`shot_brightness(0x59)`
+
+控制端收到 resp 后即可按 `chunk_total` 预分配缓冲区。
+
+### 14.6 数据分片包（device -> control）
+
+- `msg_type = event`
+- `op_code = 0x0071`
+- `flags.need_ack = 0`（当前实现；可靠性由整帧 CRC32 + 重新截图保证）
+- TLV:
+  - `session_id(0x0E)`
+  - `shot_frame_id(0x56)`
+  - `chunk_index(0x20)`
+  - `shot_data(0x57)`
+
+规则:
+- `chunk_index` 从 0 连续递增，最后一片长度可小于 `shot_chunk_size`。
+- 各片 `shot_data` 按 14.4 的线性字节流顺序拼接，无额外行填充（no row padding）。
+- 单片建议大小：BLE 128~180 字节，UART 512~1024 字节。
+
+### 14.7 结束包（device -> control）
+
+- `msg_type = event`
+- `op_code = 0x0072`
+- TLV:
+  - `session_id(0x0E)`
+  - `shot_frame_id(0x56)`
+  - `chunk_total(0x21)`
+  - `chunk_crc32(0x22)`
+
+控制端校验 CRC32 失败或缺片时，可重新发起 `0x0070` 请求整帧（当前不支持单片重传）。
+
+### 14.8 错误场景
+
+- `4001 Bad Request`：TLV 字段类型/长度非法
+- `4010 / 4011`：未握手或 `session_id` 无效
+- `4040 Screenshot Busy`：上一次截图传输尚未结束
+- `4041 Unsupported Shot Format`：`shot_format` 不在支持列表
+- `4042 Shot Chunk Error`：分片缺失、重复或超时
+- `5004 Framebuffer Unavailable`：画布未初始化（显示任务未启动）
+
+### 14.9 交互示例
+
+请求（control -> device）:
+
+```text
+// header: app_id=108, op_code=0x0070, msg_type=cmd, need_ack=1
+0E 00 04 12 34 56 78   // session_id
+50 00 01 01            // shot_format = RGB888
+58 00 02 00 B4         // shot_chunk_size = 180
+```
+
+响应元信息（device -> control）:
+
+```text
+// header: app_id=108, op_code=0x0070, msg_type=resp
+01 00 04 00 00 00 2A   // ack_for_msg_id
+56 00 04 00 00 00 07   // shot_frame_id = 7
+50 00 01 01            // shot_format = RGB888
+51 00 02 00 20         // shot_width = 32
+52 00 02 00 20         // shot_height = 32
+53 00 01 01            // shot_pixel_order = row_major_top_left
+54 00 01 03            // shot_bytes_per_pixel = 3
+55 00 04 00 00 0C 00   // shot_total_size = 3072
+21 00 02 00 12         // chunk_total = 18
+22 00 04 DE AD BE EF   // chunk_crc32
+58 00 02 00 B4         // shot_chunk_size = 180
+59 00 01 7D            // shot_brightness = 125
+```
+
+分片（device -> control，第 0 片）:
+
+```text
+// header: app_id=108, op_code=0x0071, msg_type=event
+0E 00 04 12 34 56 78   // session_id
+56 00 04 00 00 00 07   // shot_frame_id
+20 00 02 00 00         // chunk_index = 0
+57 00 B4 ...           // shot_data (180 bytes)
+```
+
+结束（device -> control）:
+
+```text
+// header: app_id=108, op_code=0x0072, msg_type=event
+0E 00 04 12 34 56 78   // session_id
+56 00 04 00 00 00 07   // shot_frame_id
+21 00 02 00 12         // chunk_total = 18
+22 00 04 DE AD BE EF   // chunk_crc32
+```
+
+---
+
 ## 附录 A: 二进制示例（app.switch -> Weather）
 
 场景:
@@ -678,3 +1144,12 @@ TLV 设计:
 1. `HELLO -> RESP` 建链
 2. 基于 `need_ack + ack_for_msg_id` 的超时重传
 3. 失联后重握手
+
+### B.9 截图实现细节
+
+- 路由：`app_id=108`，`op_code=0x0070`；同一时刻只允许一个截图传输，否则返回 `4040`。
+- `shot_chunk_size` 默认 `128`，设备夹紧到 `32~200`；实际采用值在 resp 的 `shot_chunk_size` 中回显。
+- 分片以约 5ms 间隔从主循环泵出，`msg_type=event`，不要求 ACK；每包额外携带 `session_id`。
+- 当前分辨率 32x32，RGB888 总长 3072 字节，默认共 24 片。
+- 会话断开或重新握手时，未完成的截图传输会被丢弃。
+- 不支持单片重传；`chunk_crc32` 校验失败需重新发起 `0x0070`。

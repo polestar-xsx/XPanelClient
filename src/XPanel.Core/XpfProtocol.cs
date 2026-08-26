@@ -20,6 +20,9 @@ namespace XPanel.Core.Protocol
         public const ushort AppIdProtocolMgr = 106;
         public const ushort AppIdRtcMgr = 107;
         public const ushort AppIdNotificationMgr = 101;
+        public const ushort AppIdNvmMgr = 102;
+        public const ushort AppIdNetworkMgr = 100;
+        public const ushort AppIdDisplayMgr = 108;
         public const ushort OpSessionHello = 0x0003;
         public const ushort OpSessionBye = 0x0004;
         public const ushort OpSessionKeepalive = 0x0005;
@@ -29,6 +32,22 @@ namespace XPanel.Core.Protocol
         public const ushort OpNotifyAssetChunk = 0x0022;
         public const ushort OpNotifyAssetEnd = 0x0023;
         public const ushort OpNotifyCancel = 0x0024;
+        public const ushort OpNvmWrite = 0x0040;
+        public const ushort OpNvmRead = 0x0041;
+        public const ushort OpWeatherUpdate = 0x0030;
+        public const ushort OpDisplayScreenshot = 0x0070;
+        public const ushort OpDisplayShotChunk = 0x0071;
+        public const ushort OpDisplayShotEnd = 0x0072;
+
+        // 天气同步模式（wx_mode，见协议第 12 章）
+        public const byte WxModeDataSync = 0x01;
+
+        // 统一配置作用域与配置项 ID（见协议第 13 章）
+        public const byte CfgScopeDeviceNvm = 0x01;
+        public const ushort CfgIdWifiSsid = 0x0002;
+        public const ushort CfgIdWifiPassword = 0x0003;
+        public const ushort CfgIdWeatherProvince = 0x0004;
+        public const ushort CfgIdWeatherCity = 0x0005;
 
         public const byte TlvAckForMsgId = 0x01;
         public const byte TlvEndpointId = 0x06;
@@ -55,6 +74,42 @@ namespace XPanel.Core.Protocol
         public const byte TlvChunkIndex = 0x20;
         public const byte TlvChunkTotal = 0x21;
         public const byte TlvChunkCrc32 = 0x22;
+        public const byte TlvCfgScope = 0x23;
+        public const byte TlvCfgCount = 0x24;
+        public const byte TlvCfgId = 0x25;
+        public const byte TlvCfgValueType = 0x26;
+        public const byte TlvCfgValue = 0x27;
+        public const byte TlvCfgItemStatus = 0x28;
+        public const byte TlvCfgFlags = 0x29;
+
+        // Screenshot TLVs (see protocol section 14).
+        public const byte TlvShotFormat = 0x50;
+        public const byte TlvShotWidth = 0x51;
+        public const byte TlvShotHeight = 0x52;
+        public const byte TlvShotPixelOrder = 0x53;
+        public const byte TlvShotBytesPerPixel = 0x54;
+        public const byte TlvShotTotalSize = 0x55;
+        public const byte TlvShotFrameId = 0x56;
+        public const byte TlvShotData = 0x57;
+        public const byte TlvShotChunkSize = 0x58;
+
+        // 天气同步 TLV（见协议第 12.2 节）
+        public const byte TlvWxMode = 0x30;
+        public const byte TlvWxValid = 0x31;
+        public const byte TlvWxHasTemp = 0x32;
+        public const byte TlvWxHasCode = 0x33;
+        public const byte TlvWxCity = 0x34;
+        public const byte TlvWxTempCx10 = 0x35;
+        public const byte TlvWxCode = 0x36;
+        public const byte TlvWxFutureCount = 0x37;
+        public const byte TlvWxDay1MinCx10 = 0x38;
+        public const byte TlvWxDay1MaxCx10 = 0x39;
+        public const byte TlvWxDay1Code = 0x3A;
+        public const byte TlvWxDay2MinCx10 = 0x3B;
+        public const byte TlvWxDay2MaxCx10 = 0x3C;
+        public const byte TlvWxDay2Code = 0x3D;
+        public const byte TlvWxUpdateUnixSec = 0x3E;
+        public const byte TlvWxErrorCode = 0x3F;
     }
 
     public sealed class XpfFrame

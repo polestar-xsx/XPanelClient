@@ -9,6 +9,7 @@ using System.Windows;
 using XPanel.Core.Communication;
 using XPanel.Core.Device;
 using XPanel.Core.Protocol;
+using XPanel.Core.Weather;
 
 namespace XPanel.Application
 {
@@ -172,6 +173,39 @@ namespace XPanel.Application
                 timeSource,
                 timeSetMode,
                 cancellationToken);
+        }
+
+        /// <summary>
+        /// 按协议 wx_mode=1 下发天气数据同步（app_id=100 NetworkMgr, op_code=0x0030）。
+        /// </summary>
+        public async Task<bool> SendWeatherUpdateAsync(
+            string key,
+            WeatherData data,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(key) || data == null)
+            {
+                return false;
+            }
+
+            ICommunicationChannel? channel;
+            uint sessionId;
+
+            lock (_channelLock)
+            {
+                if (!_connectedChannels.TryGetValue(key, out channel) ||
+                    !_channelSessions.TryGetValue(key, out sessionId))
+                {
+                    return false;
+                }
+            }
+
+            if (channel == null)
+            {
+                return false;
+            }
+
+            return await SendWeatherUpdateFrameAsync(channel, sessionId, data, cancellationToken);
         }
 
         public async Task ShutdownConnectionsAsync()
@@ -896,6 +930,79 @@ namespace XPanel.Application
 
             byte[] payload = XpfCodec.Serialize(frame);
             return await channel.SendAsync(payload, cancellationToken);
+        }
+
+        private static async Task<bool> SendWeatherUpdateFrameAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            WeatherData data,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+
+            var frame = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                Hop = 0,
+                AppId = XpfProtocolConstants.AppIdNetworkMgr,
+                OpCode = XpfProtocolConstants.OpWeatherUpdate,
+                MsgId = msgId,
+                TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            };
+
+            byte futureCount = Math.Min(data.FutureDayCount, (byte)WeatherData.MaxFutureDays);
+
+            frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+            frame.Tlvs[XpfProtocolConstants.TlvWxMode] = new[] { XpfProtocolConstants.WxModeDataSync };
+            frame.Tlvs[XpfProtocolConstants.TlvWxValid] = new byte[] { (byte)(data.Valid ? 1 : 0) };
+            frame.Tlvs[XpfProtocolConstants.TlvWxHasTemp] = new byte[] { (byte)(data.HasTemperature ? 1 : 0) };
+            frame.Tlvs[XpfProtocolConstants.TlvWxHasCode] = new byte[] { (byte)(data.HasWeatherCode ? 1 : 0) };
+            frame.Tlvs[XpfProtocolConstants.TlvWxCity] = EncodeWxCity(data.City);
+            frame.Tlvs[XpfProtocolConstants.TlvWxTempCx10] = XpfCodec.EncodeInt16(WeatherData.ToTempX10(data.TemperatureC));
+            frame.Tlvs[XpfProtocolConstants.TlvWxCode] = new[] { data.WeatherCode };
+            frame.Tlvs[XpfProtocolConstants.TlvWxFutureCount] = new[] { futureCount };
+
+            if (futureCount >= 1)
+            {
+                var day1 = data.FutureDays[0];
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay1MinCx10] = XpfCodec.EncodeInt16(WeatherData.ToTempX10(day1.TempMinC));
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay1MaxCx10] = XpfCodec.EncodeInt16(WeatherData.ToTempX10(day1.TempMaxC));
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay1Code] = new[] { day1.WeatherCode };
+            }
+
+            if (futureCount >= 2)
+            {
+                var day2 = data.FutureDays[1];
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay2MinCx10] = XpfCodec.EncodeInt16(WeatherData.ToTempX10(day2.TempMinC));
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay2MaxCx10] = XpfCodec.EncodeInt16(WeatherData.ToTempX10(day2.TempMaxC));
+                frame.Tlvs[XpfProtocolConstants.TlvWxDay2Code] = new[] { day2.WeatherCode };
+            }
+
+            byte[] payload = XpfCodec.Serialize(frame);
+            return await channel.SendAsync(payload, cancellationToken);
+        }
+
+        // wx_city 协议建议 <=23 字节 UTF-8（设备端 city[24]）；按 UTF-8 边界安全截断。
+        private static byte[] EncodeWxCity(string city)
+        {
+            const int maxBytes = 23;
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(city ?? string.Empty);
+            if (bytes.Length <= maxBytes)
+            {
+                return bytes;
+            }
+
+            int end = maxBytes;
+            while (end > 0 && (bytes[end] & 0xC0) == 0x80)
+            {
+                end--;
+            }
+
+            byte[] truncated = new byte[end];
+            Array.Copy(bytes, truncated, end);
+            return truncated;
         }
 
         protected override void OnStartup(StartupEventArgs e)

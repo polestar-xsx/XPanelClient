@@ -86,13 +86,17 @@ namespace XPanel.Communication.Bluetooth
                 }
 
                 State = ConnectionState.Connecting;
+                WriteBleTransportLog($"[CONNECT] {ChannelName}: start addressType={_addressType}");
 
                 _bleDevice = await ConnectDeviceWithAddressTypeAsync();
                 if (_bleDevice == null)
                 {
+                    WriteBleTransportLog($"[CONNECT] {ChannelName}: FromBluetoothAddressAsync returned null");
                     State = ConnectionState.Failed;
                     return false;
                 }
+
+                WriteBleTransportLog($"[CONNECT] {ChannelName}: device object acquired, name={_bleDevice.Name}");
 
                 var serviceResult = await AwaitWithTimeout(
                     _bleDevice.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached).AsTask(),
@@ -100,6 +104,7 @@ namespace XPanel.Communication.Bluetooth
                     "发现 Service");
                 if (serviceResult.Status != GattCommunicationStatus.Success || serviceResult.Services.Count == 0)
                 {
+                    WriteBleTransportLog($"[CONNECT] {ChannelName}: service discovery failed, status={serviceResult.Status}, count={serviceResult.Services.Count}");
                     State = ConnectionState.Failed;
                     return false;
                 }
@@ -112,6 +117,7 @@ namespace XPanel.Communication.Bluetooth
                     "发现 RX 特征");
                 if (rxResult.Status != GattCommunicationStatus.Success || rxResult.Characteristics.Count == 0)
                 {
+                    WriteBleTransportLog($"[CONNECT] {ChannelName}: RX discovery failed, status={rxResult.Status}, count={rxResult.Characteristics.Count}");
                     State = ConnectionState.Failed;
                     return false;
                 }
@@ -122,6 +128,7 @@ namespace XPanel.Communication.Bluetooth
                     "发现 TX 特征");
                 if (txResult.Status != GattCommunicationStatus.Success || txResult.Characteristics.Count == 0)
                 {
+                    WriteBleTransportLog($"[CONNECT] {ChannelName}: TX discovery failed, status={txResult.Status}, count={txResult.Characteristics.Count}");
                     State = ConnectionState.Failed;
                     return false;
                 }
@@ -140,16 +147,19 @@ namespace XPanel.Communication.Bluetooth
 
                 if (notifyStatus != GattCommunicationStatus.Success)
                 {
+                    WriteBleTransportLog($"[CONNECT] {ChannelName}: enable Notify failed, status={notifyStatus}");
                     State = ConnectionState.Failed;
                     return false;
                 }
 
                 State = ConnectionState.Connected;
+                WriteBleTransportLog($"[CONNECT] {ChannelName}: success");
                 return true;
             }
             catch (Exception ex)
             {
                 State = ConnectionState.Failed;
+                WriteBleTransportLog($"[CONNECT] {ChannelName}: exception={ex.GetType().Name}, message={ex.Message}");
                 OnError(ex, $"BLE 连接失败: {_addressHex}");
                 return false;
             }

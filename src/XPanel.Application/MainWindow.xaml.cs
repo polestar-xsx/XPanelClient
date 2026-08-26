@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -27,6 +28,7 @@ using XPanel.Communication.MQTT;
 using XPanel.Communication.Serial;
 using XPanel.Core.Communication;
 using XPanel.Core.Protocol;
+using XPanel.Core.Weather;
 
 namespace XPanel.Application
 {
@@ -1896,6 +1898,12 @@ namespace XPanel.Application
         private readonly object _timeSyncLock = new();
         private static readonly TimeSpan TimeSyncInterval = TimeSpan.FromMinutes(30);
 
+        private readonly Dictionary<string, CancellationTokenSource> _weatherSyncLoops = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _lastWeatherSignatures = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _weatherSyncLock = new();
+        private readonly WeatherService _weatherService = new();
+        private static readonly TimeSpan WeatherSyncInterval = TimeSpan.FromMinutes(10);
+
         // Static method for logging
         public static void WriteAppLog(string message, string category = "General")
         {
@@ -2202,6 +2210,12 @@ namespace XPanel.Application
             {
                 EnsureTimeSyncScheduleForDevice(_selectedDeviceKey);
             }
+
+            if (string.Equals(item.Category, "Weather", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(_selectedDeviceKey))
+            {
+                EnsureWeatherSyncScheduleForDevice(_selectedDeviceKey);
+            }
         }
 
         private void UpdateTabContent()
@@ -2209,15 +2223,16 @@ namespace XPanel.Application
             if (LeftTabControl.SelectedIndex >= 0)
             {
                 // 更新标签页头部文字
-                string[] tabHeaders = { "Device", "Synchronization", "System Settings" };
+                string[] tabHeaders = { "Device", "Synchronization", "Clock Style", "System Settings" };
                 TabHeader.Text = tabHeaders[LeftTabControl.SelectedIndex];
 
                 // 显示/隐藏对应的内容面板
                 DeviceInfoPanel.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
-                SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+                SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 3 ? Visibility.Visible : Visibility.Collapsed;
+                ClockStylePanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
                 AddDeviceBottomButton.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
-                DeviceSelectorPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+                DeviceSelectorPanel.Visibility = (LeftTabControl.SelectedIndex == 1 || LeftTabControl.SelectedIndex == 2) ? Visibility.Visible : Visibility.Collapsed;
 
                 // 当切换到Synchronization页面时，刷新UI
                 if (LeftTabControl.SelectedIndex == 1)
@@ -2227,6 +2242,371 @@ namespace XPanel.Application
                     {
                         DeviceSelector.SelectedIndex = 0;
                     }
+                }
+                else if (LeftTabControl.SelectedIndex == 2)
+                {
+                    InitializeDeviceSelectorForSync();
+                    if (DeviceSelector.Items.Count > 0)
+                    {
+                        DeviceSelector.SelectedIndex = 0;
+                    }
+                }
+            }
+        }
+
+        private void ClockFontColor_Click(object sender, RoutedEventArgs e)
+        {
+            using (var dialog = new WinForms.ColorDialog { FullOpen = true })
+            {
+                if (ClockFontColorSwatch.Background is SolidColorBrush current)
+                {
+                    dialog.Color = System.Drawing.Color.FromArgb(
+                        current.Color.A, current.Color.R, current.Color.G, current.Color.B);
+                }
+
+                if (dialog.ShowDialog() == WinForms.DialogResult.OK)
+                {
+                    var c = dialog.Color;
+                    ClockFontColorSwatch.Background = new SolidColorBrush(
+                        System.Windows.Media.Color.FromArgb(c.A, c.R, c.G, c.B));
+                }
+            }
+        }
+
+        private async void RequestScreenshot_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_selectedDeviceKey))
+            {
+                WriteAppLog("Screenshot request ignored because no device is selected.", "Screenshot");
+                return;
+            }
+
+            RequestScreenshotButton.IsEnabled = false;
+            try
+            {
+                await RequestScreenshotAsync(_selectedDeviceKey);
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"Screenshot request failed: device={_selectedDeviceKey}, reason={ex.Message}", "Screenshot");
+            }
+            finally
+            {
+                RequestScreenshotButton.IsEnabled = true;
+            }
+        }
+
+        private async Task RequestScreenshotAsync(string channelKey)
+        {
+            if (!_connectedDevices.TryGetValue(channelKey, out var device) ||
+                device.Status != DeviceConnectionVisualState.Connected ||
+                device.CommunicationChannel == null ||
+                !device.SessionId.HasValue)
+            {
+                throw new InvalidOperationException("Selected device is not connected.");
+            }
+
+            ICommunicationChannel channel = device.CommunicationChannel;
+            uint requestMessageId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+            var metadataTcs = new TaskCompletionSource<ScreenshotMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var imageDataTcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(4096);
+            var chunks = new SortedDictionary<ushort, byte[]>();
+            ScreenshotMetadata? metadata = null;
+
+            void Fail(Exception exception)
+            {
+                metadataTcs.TrySetException(exception);
+                imageDataTcs.TrySetException(exception);
+            }
+
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    while (TryExtractFirstXpfFrame(receiveBuffer, out var frameBytes))
+                    {
+                        try
+                        {
+                            XpfFrame frame = XpfCodec.Deserialize(frameBytes);
+                            if (frame.AppId != XpfProtocolConstants.AppIdDisplayMgr)
+                            {
+                                continue;
+                            }
+
+                            if (frame.OpCode == XpfProtocolConstants.OpDisplayScreenshot &&
+                                XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) &&
+                                ackForMsgId == requestMessageId)
+                            {
+                                if (frame.MessageType == XpfMessageType.Error)
+                                {
+                                    Fail(new InvalidOperationException("Device rejected the screenshot request."));
+                                    continue;
+                                }
+
+                                metadata = ParseScreenshotMetadata(frame);
+                                metadataTcs.TrySetResult(metadata);
+                                continue;
+                            }
+
+                            if (metadata == null ||
+                                !XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvShotFrameId, out uint frameId) ||
+                                frameId != metadata.FrameId)
+                            {
+                                continue;
+                            }
+
+                            if (frame.OpCode == XpfProtocolConstants.OpDisplayShotChunk &&
+                                frame.MessageType == XpfMessageType.Event &&
+                                XpfCodec.TryReadUInt16(frame.Tlvs, XpfProtocolConstants.TlvChunkIndex, out ushort chunkIndex) &&
+                                frame.Tlvs.TryGetValue(XpfProtocolConstants.TlvShotData, out byte[]? chunkData))
+                            {
+                                chunks[chunkIndex] = chunkData;
+                            }
+                            else if (frame.OpCode == XpfProtocolConstants.OpDisplayShotEnd &&
+                                     frame.MessageType == XpfMessageType.Event)
+                            {
+                                imageDataTcs.TrySetResult(AssembleScreenshotData(metadata, chunks, frame));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Fail(ex);
+                        }
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+            try
+            {
+                await channel.StartReceivingAsync(CancellationToken.None);
+
+                var request = new XpfFrame
+                {
+                    MessageType = XpfMessageType.Cmd,
+                    Flags = 0x01,
+                    QosLevel = 1,
+                    AppId = XpfProtocolConstants.AppIdDisplayMgr,
+                    OpCode = XpfProtocolConstants.OpDisplayScreenshot,
+                    MsgId = requestMessageId,
+                    TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                };
+                request.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(device.SessionId.Value);
+                request.Tlvs[XpfProtocolConstants.TlvShotFormat] = new byte[] { 1 };
+                request.Tlvs[XpfProtocolConstants.TlvShotChunkSize] = XpfCodec.EncodeUInt16(180);
+
+                if (!await channel.SendAsync(XpfCodec.Serialize(request)))
+                {
+                    throw new InvalidOperationException("Screenshot request could not be sent.");
+                }
+
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                using var registration = timeoutCts.Token.Register(() => Fail(new TimeoutException("Screenshot transfer timed out.")));
+                ScreenshotMetadata receivedMetadata = await metadataTcs.Task;
+                byte[] imageData = await imageDataTcs.Task;
+                BitmapSource bitmap = CreateScreenshotBitmap(receivedMetadata, imageData);
+                ShowScreenshotWindow(bitmap, device.DeviceName);
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
+        }
+
+        private static ScreenshotMetadata ParseScreenshotMetadata(XpfFrame frame)
+        {
+            if (!XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvShotFrameId, out uint frameId) ||
+                !XpfCodec.TryReadUInt16(frame.Tlvs, XpfProtocolConstants.TlvShotWidth, out ushort width) ||
+                !XpfCodec.TryReadUInt16(frame.Tlvs, XpfProtocolConstants.TlvShotHeight, out ushort height) ||
+                !XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvShotTotalSize, out uint totalSize) ||
+                !XpfCodec.TryReadUInt16(frame.Tlvs, XpfProtocolConstants.TlvChunkTotal, out ushort chunkTotal) ||
+                !XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvChunkCrc32, out uint crc32) ||
+                !TryReadByte(frame.Tlvs, XpfProtocolConstants.TlvShotFormat, out byte format) ||
+                !TryReadByte(frame.Tlvs, XpfProtocolConstants.TlvShotPixelOrder, out byte pixelOrder) ||
+                !TryReadByte(frame.Tlvs, XpfProtocolConstants.TlvShotBytesPerPixel, out byte bytesPerPixel))
+            {
+                throw new InvalidDataException("Screenshot metadata is incomplete.");
+            }
+
+            if (width == 0 || height == 0 || chunkTotal == 0 || totalSize == 0 || totalSize > 16 * 1024 * 1024 ||
+                pixelOrder is < 1 or > 2 || format is < 1 or > 3 ||
+                (format == 1 && bytesPerPixel != 3) || (format != 1 && bytesPerPixel != 2) ||
+                (long)width * height * bytesPerPixel != totalSize)
+            {
+                throw new InvalidDataException("Screenshot metadata is invalid.");
+            }
+
+            return new ScreenshotMetadata(frameId, width, height, format, pixelOrder, bytesPerPixel, totalSize, chunkTotal, crc32);
+        }
+
+        private static byte[] AssembleScreenshotData(ScreenshotMetadata metadata, SortedDictionary<ushort, byte[]> chunks, XpfFrame endFrame)
+        {
+            if (!XpfCodec.TryReadUInt16(endFrame.Tlvs, XpfProtocolConstants.TlvChunkTotal, out ushort endChunkTotal) ||
+                !XpfCodec.TryReadUInt32(endFrame.Tlvs, XpfProtocolConstants.TlvChunkCrc32, out uint endCrc32) ||
+                endChunkTotal != metadata.ChunkTotal || endCrc32 != metadata.Crc32 || chunks.Count != metadata.ChunkTotal)
+            {
+                throw new InvalidDataException("Screenshot transfer is incomplete.");
+            }
+
+            using var stream = new MemoryStream((int)metadata.TotalSize);
+            for (ushort index = 0; index < metadata.ChunkTotal; index++)
+            {
+                if (!chunks.TryGetValue(index, out byte[]? chunk))
+                {
+                    throw new InvalidDataException("Screenshot transfer has missing chunks.");
+                }
+
+                stream.Write(chunk, 0, chunk.Length);
+            }
+
+            byte[] imageData = stream.ToArray();
+            if (imageData.Length != metadata.TotalSize || ComputeCrc32(imageData) != metadata.Crc32)
+            {
+                throw new InvalidDataException("Screenshot data validation failed.");
+            }
+
+            return imageData;
+        }
+
+        private static BitmapSource CreateScreenshotBitmap(ScreenshotMetadata metadata, byte[] imageData)
+        {
+            int stride = metadata.Width * 4;
+            byte[] pixels = new byte[metadata.Height * stride];
+            for (int y = 0; y < metadata.Height; y++)
+            {
+                int sourceY = metadata.PixelOrder == 1 ? y : metadata.Height - 1 - y;
+                for (int x = 0; x < metadata.Width; x++)
+                {
+                    int sourceOffset = (sourceY * metadata.Width + x) * metadata.BytesPerPixel;
+                    int targetOffset = y * stride + x * 4;
+                    byte red;
+                    byte green;
+                    byte blue;
+                    if (metadata.Format == 1)
+                    {
+                        red = imageData[sourceOffset];
+                        green = imageData[sourceOffset + 1];
+                        blue = imageData[sourceOffset + 2];
+                    }
+                    else
+                    {
+                        ushort value = metadata.Format == 2
+                            ? (ushort)((imageData[sourceOffset] << 8) | imageData[sourceOffset + 1])
+                            : (ushort)(imageData[sourceOffset] | (imageData[sourceOffset + 1] << 8));
+                        red = (byte)((((value >> 11) & 0x1F) * 255 + 15) / 31);
+                        green = (byte)((((value >> 5) & 0x3F) * 255 + 31) / 63);
+                        blue = (byte)(((value & 0x1F) * 255 + 15) / 31);
+                    }
+
+                    pixels[targetOffset] = blue;
+                    pixels[targetOffset + 1] = green;
+                    pixels[targetOffset + 2] = red;
+                    pixels[targetOffset + 3] = 255;
+                }
+            }
+
+            var bitmap = new WriteableBitmap(metadata.Width, metadata.Height, 96, 96, PixelFormats.Bgra32, null);
+            bitmap.WritePixels(new Int32Rect(0, 0, metadata.Width, metadata.Height), pixels, stride, 0);
+            bitmap.Freeze();
+            return bitmap;
+        }
+
+        private static string SaveScreenshotBitmap(BitmapSource bitmap, string directory, string fileName)
+        {
+            Directory.CreateDirectory(directory);
+            string filePath = Path.Combine(directory, fileName);
+            var encoder = new BmpBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using var stream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write);
+            encoder.Save(stream);
+            return filePath;
+        }
+
+        private void ShowScreenshotWindow(BitmapSource bitmap, string deviceName)
+        {
+            var image = new LedMatrixDisplay { SourceBitmap = bitmap };
+            if (image.RenderedBitmap == null)
+            {
+                throw new InvalidOperationException("Screenshot preview could not be rendered.");
+            }
+
+            string directory = Path.Combine(AppContext.BaseDirectory, "snapshot");
+            string safeDeviceName = string.Concat(deviceName.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
+            string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+            string rawFilePath = SaveScreenshotBitmap(bitmap, directory, $"{safeDeviceName}-{timestamp}-raw.bmp");
+            string previewFilePath = SaveScreenshotBitmap(image.RenderedBitmap, directory, $"{safeDeviceName}-{timestamp}-preview.bmp");
+            var window = new Window
+            {
+                Title = $"Screenshot - {deviceName}",
+                Owner = this,
+                Content = new ScrollViewer { Content = image, Margin = new Thickness(16) },
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                SizeToContent = SizeToContent.WidthAndHeight,
+                MaxWidth = SystemParameters.WorkArea.Width * 0.9,
+                MaxHeight = SystemParameters.WorkArea.Height * 0.9,
+            };
+            window.Show();
+            WriteAppLog($"Screenshot saved: raw={rawFilePath}, preview={previewFilePath}", "Screenshot");
+        }
+
+        private static bool TryReadByte(Dictionary<byte, byte[]> tlvs, byte type, out byte value)
+        {
+            value = default;
+            return tlvs.TryGetValue(type, out byte[]? bytes) && bytes.Length == 1 && (value = bytes[0]) == bytes[0];
+        }
+
+        private static uint ComputeCrc32(byte[] data)
+        {
+            uint crc = 0xFFFFFFFF;
+            foreach (byte value in data)
+            {
+                crc ^= value;
+                for (int bit = 0; bit < 8; bit++)
+                {
+                    crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+                }
+            }
+
+            return ~crc;
+        }
+
+        private sealed record ScreenshotMetadata(
+            uint FrameId,
+            ushort Width,
+            ushort Height,
+            byte Format,
+            byte PixelOrder,
+            byte BytesPerPixel,
+            uint TotalSize,
+            ushort ChunkTotal,
+            uint Crc32);
+
+        private string _selectedClockBackgroundMode = string.Empty;
+
+        private void ClockBackgroundMode_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (sender is not Border clicked)
+            {
+                return;
+            }
+
+            _selectedClockBackgroundMode = clicked.Tag as string ?? string.Empty;
+
+            var highlight = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x21, 0x96, 0xF3));
+            var normal = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0));
+
+            foreach (var child in ClockBackgroundModePanel.Children)
+            {
+                if (child is Border border)
+                {
+                    border.BorderBrush = ReferenceEquals(border, clicked) ? highlight : normal;
                 }
             }
         }
@@ -2258,6 +2638,7 @@ namespace XPanel.Application
             }
 
             StopAllTimeSyncSchedules();
+            StopAllWeatherSyncSchedules();
             ((SyncItemService)_syncItemService).StopNotificationForwarding();
             ((SyncItemService)_syncItemService).StopTeamsForwarding();
             _trayIcon?.Dispose();
@@ -2277,6 +2658,7 @@ namespace XPanel.Application
                 if (e.State == App.ChannelSessionState.Disconnected)
                 {
                     StopTimeSyncSchedule(e.Key);
+                    StopWeatherSyncSchedule(e.Key);
                     _connectedDevices[e.Key] = existing with
                     {
                         Status = DeviceConnectionVisualState.Disconnected,
@@ -2296,9 +2678,16 @@ namespace XPanel.Application
                 };
 
                 EnsureTimeSyncScheduleForDevice(e.Key);
+                EnsureWeatherSyncScheduleForDevice(e.Key);
                 UpdateNotificationForwardingState("channel-connected");
                 UpdateTeamsForwardingState("channel-connected");
                 RefreshConnectedDeviceUi();
+
+                var connectedEntry = _connectedDevices[e.Key];
+                if (connectedEntry.SessionId.HasValue && connectedEntry.CommunicationChannel != null)
+                {
+                    _ = ReadAndPersistDeviceConfigAsync(e.Key, connectedEntry.CommunicationChannel, connectedEntry.SessionId.Value);
+                }
             });
         }
 
@@ -2352,6 +2741,7 @@ namespace XPanel.Application
                 WriteAppLog($"Manual add device success: key={channelKey}, name={addDeviceWindow.ConnectedDeviceName}, addr={address}", "Device");
 
                 EnsureTimeSyncScheduleForDevice(channelKey);
+                EnsureWeatherSyncScheduleForDevice(channelKey);
 
                 RefreshConnectedDeviceUi();
                 SaveSavedDevicesToConfig();
@@ -2380,13 +2770,20 @@ namespace XPanel.Application
             }
 
             bool needResumeTimeSync = IsTimeSyncEnabledForDevice(channelKey);
+            bool needResumeWeatherSync = IsWeatherSyncEnabledForDevice(channelKey);
             StopTimeSyncSchedule(channelKey);
+            StopWeatherSyncSchedule(channelKey);
 
             if (!removedFromChannel)
             {
                 if (needResumeTimeSync)
                 {
                     EnsureTimeSyncScheduleForDevice(channelKey);
+                }
+
+                if (needResumeWeatherSync)
+                {
+                    EnsureWeatherSyncScheduleForDevice(channelKey);
                 }
 
                 removeButton.IsEnabled = true;
@@ -2635,10 +3032,20 @@ namespace XPanel.Application
             }
         }
 
+        private string BuildDeviceInfoLine(string channelKey)
+        {
+            _savedDevices.TryGetValue(channelKey, out var saved);
+
+            string network = saved?.NetworkName ?? string.Empty;
+            string password = saved?.NetworkPassword ?? string.Empty;
+            string city = string.Concat(saved?.WeatherProvince ?? string.Empty, saved?.WeatherCity ?? string.Empty);
+
+            return $"Network: {network}    Network Password: {password}    City: {city}";
+        }
+
         private void RefreshConnectedDeviceUi()
         {
             ConnectedDevicesPanel.Children.Clear();
-
             if (_connectedDevices.Count == 0)
             {
                 NoConnectedDevicesText.Visibility = Visibility.Visible;
@@ -2691,6 +3098,12 @@ namespace XPanel.Application
                     VerticalAlignment = VerticalAlignment.Center,
                 });
 
+                var textStack = new StackPanel
+                {
+                    Orientation = Orientation.Vertical,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+
                 var deviceText = new TextBlock
                 {
                     Text = $"{device.DeviceName} ({device.MethodDisplay})",
@@ -2700,7 +3113,18 @@ namespace XPanel.Application
                     VerticalAlignment = VerticalAlignment.Center,
                     TextWrapping = TextWrapping.Wrap,
                 };
-                leftGroup.Children.Add(deviceText);
+                textStack.Children.Add(deviceText);
+
+                textStack.Children.Add(new TextBlock
+                {
+                    Text = BuildDeviceInfoLine(device.ChannelKey),
+                    FontSize = 12,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102)),
+                    Margin = new Thickness(0, 4, 0, 0),
+                    TextWrapping = TextWrapping.Wrap,
+                });
+
+                leftGroup.Children.Add(textStack);
 
                 var removeButton = new System.Windows.Controls.Button
                 {
@@ -2935,9 +3359,33 @@ namespace XPanel.Application
 
                 try
                 {
-                    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-                    WriteAppLog($"Connecting transport: key={channelKey}, addr={saved.DeviceAddress}, addrType={saved.BleAddressType}", "AutoConnect");
-                    ICommunicationChannel channel = await ConnectBySavedChannelAsync(saved, timeoutCts.Token);
+                    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+                    ICommunicationChannel? channel = null;
+                    Exception? lastConnectError = null;
+
+                    for (int attempt = 1; attempt <= 3; attempt++)
+                    {
+                        try
+                        {
+                            WriteAppLog($"Connecting transport: key={channelKey}, attempt={attempt}/3, addr={saved.DeviceAddress}, addrType={saved.BleAddressType}", "AutoConnect");
+                            channel = await ConnectBySavedChannelAsync(saved, timeoutCts.Token);
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            lastConnectError = ex;
+                            WriteAppLog($"Transport connect attempt {attempt}/3 failed: key={channelKey}, reason={ex.Message}", "AutoConnect");
+                            if (attempt < 3)
+                            {
+                                await Task.Delay(TimeSpan.FromSeconds(2), timeoutCts.Token);
+                            }
+                        }
+                    }
+
+                    if (channel == null)
+                    {
+                        throw new InvalidOperationException("BLE transport connection failed after 3 attempts", lastConnectError);
+                    }
 
                     SessionHandshakeResult handshake;
                     try
@@ -3279,6 +3727,174 @@ namespace XPanel.Application
             }
         }
 
+        /// <summary>
+        /// 连接成功后从设备读取基础配置（网络名/密码/城市），成功读到则回写 devices.json 并刷新 UI。
+        /// 未读到的字段保留 devices.json 中的原值。
+        /// </summary>
+        private async Task ReadAndPersistDeviceConfigAsync(string channelKey, ICommunicationChannel channel, uint sessionId)
+        {
+            if (channel == null || string.IsNullOrEmpty(channelKey))
+            {
+                return;
+            }
+
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+                string? ssid = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiSsid, cts.Token);
+                string? password = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiPassword, cts.Token);
+                string? province = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherProvince, cts.Token);
+                string? city = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherCity, cts.Token);
+
+                if (ssid == null && password == null && province == null && city == null)
+                {
+                    WriteAppLog($"Device config read produced no values, keeping saved values: key={channelKey}", "DeviceConfig");
+                    return;
+                }
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (!_savedDevices.TryGetValue(channelKey, out var saved))
+                    {
+                        return;
+                    }
+
+                    if (ssid != null) saved.NetworkName = ssid;
+                    if (password != null) saved.NetworkPassword = password;
+                    if (province != null) saved.WeatherProvince = province;
+                    if (city != null) saved.WeatherCity = city;
+
+                    RefreshConnectedDeviceUi();
+                    SaveSavedDevicesToConfig();
+                });
+
+                WriteAppLog($"Device config read applied: key={channelKey}", "DeviceConfig");
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"Device config read failed: key={channelKey}, reason={ex.Message}", "DeviceConfig");
+            }
+        }
+
+        /// <summary>
+        /// 通过 nvm.read 读取单个配置项，返回 UTF-8 字符串；读取失败/被拒/超时返回 null。
+        /// </summary>
+        private static async Task<string?> TryReadSingleConfigAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            ushort cfgId,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+            var responseTcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(256);
+
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    while (TryExtractFirstXpfFrame(receiveBuffer, out var frameBytes))
+                    {
+                        try
+                        {
+                            var frame = XpfCodec.Deserialize(frameBytes);
+                            if (frame.OpCode == XpfProtocolConstants.OpNvmRead &&
+                                XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) &&
+                                ackForMsgId == msgId)
+                            {
+                                responseTcs.TrySetResult(frameBytes);
+                                return;
+                            }
+                        }
+                        catch
+                        {
+                            // 忽略非目标 XPF 帧。
+                        }
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+
+            try
+            {
+                await channel.StartReceivingAsync(cancellationToken);
+
+                var frame = new XpfFrame
+                {
+                    MessageType = XpfMessageType.Cmd,
+                    Flags = 0x01,
+                    QosLevel = 1,
+                    Hop = 0,
+                    AppId = XpfProtocolConstants.AppIdNvmMgr,
+                    OpCode = XpfProtocolConstants.OpNvmRead,
+                    MsgId = msgId,
+                    TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                };
+
+                frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+                frame.Tlvs[XpfProtocolConstants.TlvCfgScope] = new[] { XpfProtocolConstants.CfgScopeDeviceNvm };
+                frame.Tlvs[XpfProtocolConstants.TlvCfgCount] = new byte[] { 1 };
+                frame.Tlvs[XpfProtocolConstants.TlvCfgId] = XpfCodec.EncodeUInt16(cfgId);
+
+                bool sent = await channel.SendAsync(XpfCodec.Serialize(frame), cancellationToken);
+                if (!sent)
+                {
+                    return null;
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(3));
+                using var reg = timeoutCts.Token.Register(() => responseTcs.TrySetCanceled(timeoutCts.Token));
+
+                byte[] responseBytes;
+                try
+                {
+                    responseBytes = await responseTcs.Task;
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+
+                var response = XpfCodec.Deserialize(responseBytes);
+                if (response.MessageType == XpfMessageType.Error)
+                {
+                    return null;
+                }
+
+                // 单项状态非 0 视为读取失败（未找到/类型不符/拒绝等）。
+                if (response.Tlvs.TryGetValue(XpfProtocolConstants.TlvCfgItemStatus, out var statusBytes) &&
+                    statusBytes.Length == 1 &&
+                    statusBytes[0] != 0)
+                {
+                    return null;
+                }
+
+                if (!XpfCodec.TryReadUtf8(response.Tlvs, XpfProtocolConstants.TlvCfgValue, out string value))
+                {
+                    return null;
+                }
+
+                return value;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
+        }
+
         private static bool TryExtractFirstXpfFrame(List<byte> buffer, out byte[] frameBytes)
         {
             frameBytes = Array.Empty<byte>();
@@ -3469,6 +4085,201 @@ namespace XPanel.Application
             return await app.SendTimeSyncAsync(channelKey, cancellationToken: cancellationToken);
         }
 
+        private bool IsWeatherSyncEnabledForDevice(string channelKey)
+        {
+            if (!_savedDevices.TryGetValue(channelKey, out var device) || device.SyncConfig == null)
+            {
+                return false;
+            }
+
+            return device.SyncConfig.Any(item =>
+                string.Equals(item.Category, "Weather", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private void EnsureWeatherSyncScheduleForDevice(string channelKey)
+        {
+            if (string.IsNullOrWhiteSpace(channelKey))
+            {
+                return;
+            }
+
+            if (!IsWeatherSyncEnabledForDevice(channelKey) || !IsDeviceConnectedForTimeSync(channelKey))
+            {
+                StopWeatherSyncSchedule(channelKey);
+                return;
+            }
+
+            StartWeatherSyncSchedule(channelKey);
+        }
+
+        private void StartWeatherSyncSchedule(string channelKey)
+        {
+            CancellationTokenSource loopCts;
+
+            lock (_weatherSyncLock)
+            {
+                if (_weatherSyncLoops.ContainsKey(channelKey))
+                {
+                    return;
+                }
+
+                loopCts = new CancellationTokenSource();
+                _weatherSyncLoops[channelKey] = loopCts;
+            }
+
+            _ = RunWeatherSyncLoopAsync(channelKey, loopCts);
+        }
+
+        private void StopWeatherSyncSchedule(string channelKey)
+        {
+            CancellationTokenSource? loopCts = null;
+
+            lock (_weatherSyncLock)
+            {
+                if (_weatherSyncLoops.TryGetValue(channelKey, out var existing))
+                {
+                    loopCts = existing;
+                    _weatherSyncLoops.Remove(channelKey);
+                }
+            }
+
+            lock (_weatherSyncLock)
+            {
+                _lastWeatherSignatures.Remove(channelKey);
+            }
+
+            if (loopCts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                loopCts.Cancel();
+            }
+            catch
+            {
+                // 取消失败不阻断流程。
+            }
+        }
+
+        private void StopAllWeatherSyncSchedules()
+        {
+            List<string> keys;
+            lock (_weatherSyncLock)
+            {
+                keys = _weatherSyncLoops.Keys.ToList();
+            }
+
+            foreach (var key in keys)
+            {
+                StopWeatherSyncSchedule(key);
+            }
+        }
+
+        private async Task RunWeatherSyncLoopAsync(string channelKey, CancellationTokenSource loopCts)
+        {
+            try
+            {
+                while (!loopCts.Token.IsCancellationRequested)
+                {
+                    if (!IsWeatherSyncEnabledForDevice(channelKey) || !IsDeviceConnectedForTimeSync(channelKey))
+                    {
+                        break;
+                    }
+
+                    await SendWeatherSyncIfChangedAsync(channelKey, loopCts.Token);
+
+                    await Task.Delay(WeatherSyncInterval, loopCts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 正常停止。
+            }
+            finally
+            {
+                lock (_weatherSyncLock)
+                {
+                    if (_weatherSyncLoops.TryGetValue(channelKey, out var existing) && ReferenceEquals(existing, loopCts))
+                    {
+                        _weatherSyncLoops.Remove(channelKey);
+                    }
+                }
+
+                loopCts.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 拉取当前天气，若与上次成功下发的内容不同则按 wx_mode=1 发送给设备。
+        /// </summary>
+        private async Task SendWeatherSyncIfChangedAsync(string channelKey, CancellationToken cancellationToken)
+        {
+            string city = _savedDevices.TryGetValue(channelKey, out var device)
+                ? device.WeatherCity ?? string.Empty
+                : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(city))
+            {
+                WriteAppLog($"Weather Sync skipped (no city configured): key={channelKey}", "WeatherSync");
+                return;
+            }
+
+            WeatherData weather;
+            try
+            {
+                weather = await _weatherService.GetWeatherAsync(city, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"Weather Sync fetch error: key={channelKey}, city={city}, reason={ex.Message}", "WeatherSync");
+                return;
+            }
+
+            if (!weather.Valid)
+            {
+                WriteAppLog($"Weather Sync fetch invalid: key={channelKey}, city={city}", "WeatherSync");
+                return;
+            }
+
+            string signature = weather.BuildChangeSignature();
+            lock (_weatherSyncLock)
+            {
+                if (_lastWeatherSignatures.TryGetValue(channelKey, out var lastSignature) &&
+                    string.Equals(lastSignature, signature, StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+
+            if (System.Windows.Application.Current is not App app)
+            {
+                return;
+            }
+
+            bool sent = await app.SendWeatherUpdateAsync(channelKey, weather, cancellationToken);
+            if (sent)
+            {
+                lock (_weatherSyncLock)
+                {
+                    _lastWeatherSignatures[channelKey] = signature;
+                }
+
+                WriteAppLog(
+                    $"Weather Sync sent: key={channelKey}, city={weather.City}, tempC={weather.TemperatureC:F1}, " +
+                    $"code={weather.WeatherCode}, futureDays={weather.FutureDayCount}", "WeatherSync");
+            }
+            else
+            {
+                WriteAppLog($"Weather Sync send failed: key={channelKey}, city={weather.City}", "WeatherSync");
+            }
+        }
+
         private void LoadSavedDevicesIntoCache()
         {
             try
@@ -3509,6 +4320,10 @@ namespace XPanel.Application
                         BleAddressType = string.IsNullOrWhiteSpace(device.BleAddressType)
                             ? BleAddressType.Unknown.ToString()
                             : device.BleAddressType,
+                        NetworkName = device.NetworkName ?? string.Empty,
+                        NetworkPassword = device.NetworkPassword ?? string.Empty,
+                        WeatherProvince = device.WeatherProvince ?? string.Empty,
+                        WeatherCity = device.WeatherCity ?? string.Empty,
                         SyncConfig = device.SyncConfig ?? new List<SyncItem>(),
                     };
                 }
@@ -3543,6 +4358,10 @@ namespace XPanel.Application
                             BleAddressType = string.IsNullOrWhiteSpace(d.BleAddressType)
                                 ? BleAddressType.Unknown.ToString()
                                 : d.BleAddressType,
+                            NetworkName = d.NetworkName ?? string.Empty,
+                            NetworkPassword = d.NetworkPassword ?? string.Empty,
+                            WeatherProvince = d.WeatherProvince ?? string.Empty,
+                            WeatherCity = d.WeatherCity ?? string.Empty,
                             SyncConfig = d.SyncConfig,
                         })
                         .Where(d => !string.IsNullOrWhiteSpace(d.DeviceAddress))
@@ -3588,6 +4407,10 @@ namespace XPanel.Application
             public string DeviceAddress { get; set; } = string.Empty;
             public string Channel { get; set; } = "BLE";
             public string BleAddressType { get; set; } = "Unknown";
+            public string NetworkName { get; set; } = string.Empty;
+            public string NetworkPassword { get; set; } = string.Empty;
+            public string WeatherProvince { get; set; } = string.Empty;
+            public string WeatherCity { get; set; } = string.Empty;
             public List<SyncItem> SyncConfig { get; set; } = new();
         }
 

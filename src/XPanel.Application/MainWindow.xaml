@@ -251,6 +251,9 @@
                         <TabItem Header="Synchronization" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
+                        <TabItem Header="Clock Style" Style="{StaticResource ModernTabItemStyle}">
+                            <Grid/>
+                        </TabItem>
                         <TabItem Header="System Settings" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
@@ -317,11 +320,29 @@
                     </StackPanel>
 
                     <!-- Synchronization Panel -->
-                    <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="SyncPanel" Margin="0" Visibility="Collapsed">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="SyncPanel" Margin="0" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
                             <StackPanel Name="SyncItemsPanel" Margin="0"/>
                         </ScrollViewer>
-                    </StackPanel>
+
+                        <!-- Screenshot Request Button -->
+                        <Button Grid.Row="1" Name="RequestScreenshotButton"
+                                Style="{StaticResource RoundedRectButtonStyle}"
+                            HorizontalAlignment="Center" Margin="0,15,0,0" Padding="14,8" Background="#4CAF50"
+                                ToolTip="Request a screenshot from the device"
+                                Click="RequestScreenshot_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <Image Source="pack://application:,,,/Resources/camera.png"
+                                       Width="24" Height="24" Stretch="Uniform" VerticalAlignment="Center"/>
+                                <TextBlock Text="Request Screenshot" VerticalAlignment="Center"
+                                           Margin="8,0,0,0" FontSize="13"/>
+                            </StackPanel>
+                        </Button>
+                    </Grid>
 
                     <!-- Settings Panel -->
                     <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="SettingsPanel" Margin="0" Visibility="Collapsed">
@@ -349,6 +370,83 @@
                                     <CheckBox Content="Auto-connect on startup" Margin="0,5,0,5"/>
                                     <CheckBox Content="Enable logging" Margin="0,5,0,0"/>
                                 </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Clock Style Panel -->
+                    <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockStylePanel" Margin="0" Visibility="Collapsed">
+                        <TextBlock Text="Font" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
+                        <Border BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Margin="0,0,0,20">
+                            <StackPanel Margin="15">
+                                <!-- Font Bold -->
+                                <Grid Margin="0,0,0,18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Bold Font" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                                    <ToggleButton Grid.Column="1" Name="ClockBoldToggle" Style="{StaticResource ToggleSwitchStyle}"/>
+                                </Grid>
+
+                                <!-- Font Color -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Font Color" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Border Name="ClockFontColorSwatch" Width="28" Height="28" CornerRadius="6"
+                                                Background="#FFFFFF" BorderBrush="#CCCCCC" BorderThickness="1" Margin="0,0,10,0"/>
+                                        <Button Name="ClockFontColorButton" Content="Pick Color"
+                                                Style="{StaticResource RoundedRectButtonStyle}" Padding="16,8" FontSize="12"
+                                                Click="ClockFontColor_Click"/>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Background -->
+                        <TextBlock Text="Background" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
+                        <Border BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Margin="0,0,0,15">
+                            <StackPanel Margin="15">
+                                <TextBlock Text="Background Mode" FontWeight="Bold" Foreground="#333" Margin="0,0,0,12"/>
+                                <WrapPanel Name="ClockBackgroundModePanel" Orientation="Horizontal">
+                                    <!-- Matrix -->
+                                    <Border Name="ClockModeMatrix" Tag="Matrix" Width="150" Margin="0,0,15,0"
+                                            BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
+                                            MouseLeftButtonUp="ClockBackgroundMode_Click">
+                                        <StackPanel Margin="8">
+                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
+                                                   Height="90" Stretch="Uniform"/>
+                                            <TextBlock Text="Matrix" HorizontalAlignment="Center" FontSize="13"
+                                                       FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <!-- GravityBall -->
+                                    <Border Name="ClockModeGravityBall" Tag="GravityBall" Width="150" Margin="0,0,15,0"
+                                            BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
+                                            MouseLeftButtonUp="ClockBackgroundMode_Click">
+                                        <StackPanel Margin="8">
+                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
+                                                   Height="90" Stretch="Uniform"/>
+                                            <TextBlock Text="GravityBall" HorizontalAlignment="Center" FontSize="13"
+                                                       FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <!-- Music -->
+                                    <Border Name="ClockModeMusic" Tag="Music" Width="150" Margin="0,0,15,0"
+                                            BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
+                                            MouseLeftButtonUp="ClockBackgroundMode_Click">
+                                        <StackPanel Margin="8">
+                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
+                                                   Height="90" Stretch="Uniform"/>
+                                            <TextBlock Text="Music" HorizontalAlignment="Center" FontSize="13"
+                                                       FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
                     </StackPanel>

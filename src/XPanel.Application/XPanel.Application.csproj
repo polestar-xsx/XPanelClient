@@ -31,6 +31,16 @@
     <PackageReference Include="System.Drawing.Common" Version="6.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Placeholder thumbnail for clock background modes (replace with real images later) -->
+    <Resource Include="..\..\resources\Teams.png">
+      <Link>Resources\ClockModePlaceholder.png</Link>
+    </Resource>
+    <Resource Include="..\..\resources\camera.png">
+      <Link>Resources\camera.png</Link>
+    </Resource>
+  </ItemGroup>
+
   <!-- 输出配置 -->
   <PropertyGroup>
     <OutputPath>bin\$(Configuration)\</OutputPath>
