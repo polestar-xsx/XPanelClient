@@ -87,11 +87,15 @@ namespace XPanel.Application
                     byte blue = sourcePixels[sourceOffset];
                     byte green = sourcePixels[sourceOffset + 1];
                     byte red = sourcePixels[sourceOffset + 2];
-                    byte maximumChannel = Math.Max(red, Math.Max(green, blue));
-                    double baseWeight = 1.0 - maximumChannel / 255.0;
-                    red = BlendLedColor(red, baseWeight);
-                    green = BlendLedColor(green, baseWeight);
-                    blue = BlendLedColor(blue, baseWeight);
+                    double luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+                    const byte ledBaseColor = 0x3A;
+                    if (luminance < ledBaseColor)
+                    {
+                        double baseWeight = 1.0 - luminance / ledBaseColor;
+                        red = BlendLedColor(red, baseWeight, ledBaseColor);
+                        green = BlendLedColor(green, baseWeight, ledBaseColor);
+                        blue = BlendLedColor(blue, baseWeight, ledBaseColor);
+                    }
 
                     for (int cellY = 0; cellY < LedCellSize; cellY++)
                     {
@@ -125,10 +129,9 @@ namespace XPanel.Application
             Height = outputHeight;
         }
 
-        private static byte BlendLedColor(byte sourceColor, double baseWeight)
+        private static byte BlendLedColor(byte sourceColor, double baseWeight, byte ledBaseColor)
         {
-            const byte ledBaseColor = 0x3A;
-            return (byte)Math.Round(sourceColor + ledBaseColor * baseWeight);
+            return (byte)Math.Min(255, Math.Round(sourceColor + ledBaseColor * baseWeight));
         }
 
         private static void Fill(byte[] pixels, byte red, byte green, byte blue)

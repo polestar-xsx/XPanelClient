@@ -375,22 +375,28 @@
                     </StackPanel>
 
                     <!-- Clock Style Panel -->
-                    <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockStylePanel" Margin="0" Visibility="Collapsed">
+                    <ScrollViewer Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockStylePanel" Margin="0" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
                         <TextBlock Text="Font" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
                         <Border BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Margin="0,0,0,20">
                             <StackPanel Margin="15">
-                                <!-- Font Bold -->
+                                <!-- Font Selection -->
                                 <Grid Margin="0,0,0,18">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="Bold Font" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
-                                    <ToggleButton Grid.Column="1" Name="ClockBoldToggle" Style="{StaticResource ToggleSwitchStyle}"/>
+                                    <TextBlock Grid.Column="0" Text="Font" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                                    <ComboBox Grid.Column="1" Name="ClockFontCombo" SelectedIndex="1"
+                                              Style="{StaticResource RoundedRectComboBoxStyle}" Width="200" Height="32" FontSize="12"
+                                              SelectionChanged="ClockFontCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Normal"/>
+                                        <ComboBoxItem Content="Bold"/>
+                                    </ComboBox>
                                 </Grid>
 
                                 <!-- Font Color -->
-                                <Grid>
+                                <Grid Margin="0,0,0,18">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
@@ -404,6 +410,36 @@
                                                 Click="ClockFontColor_Click"/>
                                     </StackPanel>
                                 </Grid>
+
+                                <!-- Clock X Position -->
+                                <Grid Margin="0,0,0,18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="X Position" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center" Width="90"/>
+                                    <Slider Grid.Column="1" Name="ClockXSlider" Minimum="0" Maximum="31" Value="0"
+                                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                                            Margin="10,0,10,0" ValueChanged="ClockXSlider_ValueChanged"/>
+                                    <TextBlock Grid.Column="2" Name="ClockXText" Text="0" Foreground="#333"
+                                               VerticalAlignment="Center" MinWidth="22" TextAlignment="Right"/>
+                                </Grid>
+
+                                <!-- Clock Y Position -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Y Position" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center" Width="90"/>
+                                    <Slider Grid.Column="1" Name="ClockYSlider" Minimum="0" Maximum="31" Value="0"
+                                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                                            Margin="10,0,10,0" ValueChanged="ClockYSlider_ValueChanged"/>
+                                    <TextBlock Grid.Column="2" Name="ClockYText" Text="0" Foreground="#333"
+                                               VerticalAlignment="Center" MinWidth="22" TextAlignment="Right"/>
+                                </Grid>
                             </StackPanel>
                         </Border>
 
@@ -411,51 +447,65 @@
                         <TextBlock Text="Background" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
                         <Border BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Margin="0,0,0,15">
                             <StackPanel Margin="15">
-                                <TextBlock Text="Background Mode" FontWeight="Bold" Foreground="#333" Margin="0,0,0,12"/>
+                                <TextBlock Text="Default Mode" FontWeight="Bold" Foreground="#333" Margin="0,0,0,12"/>
                                 <WrapPanel Name="ClockBackgroundModePanel" Orientation="Horizontal">
                                     <!-- Matrix -->
-                                    <Border Name="ClockModeMatrix" Tag="Matrix" Width="150" Margin="0,0,15,0"
+                                    <Border Name="ClockModeMatrix" Tag="Matrix" Margin="0,0,15,15"
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
-                                                   Height="90" Stretch="Uniform"/>
+                                            <Image Source="pack://application:,,,/Resources/Matrix.png"
+                                                   Width="128" Height="128" Stretch="Uniform"/>
                                             <TextBlock Text="Matrix" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <!-- GravityBall -->
-                                    <Border Name="ClockModeGravityBall" Tag="GravityBall" Width="150" Margin="0,0,15,0"
+                                    <Border Name="ClockModeGravityBall" Tag="GravityBall" Margin="0,0,15,15"
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
-                                                   Height="90" Stretch="Uniform"/>
+                                            <Image Source="pack://application:,,,/Resources/GravityBall.png"
+                                                   Width="128" Height="128" Stretch="Uniform"/>
                                             <TextBlock Text="GravityBall" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <!-- Music -->
-                                    <Border Name="ClockModeMusic" Tag="Music" Width="150" Margin="0,0,15,0"
+                                    <Border Name="ClockModeMusic" Tag="Music" Margin="0,0,15,15"
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/ClockModePlaceholder.png"
-                                                   Height="90" Stretch="Uniform"/>
+                                            <Image Source="pack://application:,,,/Resources/Music.png"
+                                                   Width="128" Height="128" Stretch="Uniform"/>
                                             <TextBlock Text="Music" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
                                 </WrapPanel>
+
+                                <!-- Picture Mode -->
+                                <TextBlock Text="Picture Mode" FontWeight="Bold" Foreground="#333" Margin="0,25,0,12"/>
+                                <TextBlock Name="ClockPictureModeEmptyText" Text="No images found in ClockBackground folder"
+                                           Foreground="#999" FontSize="12" Visibility="Collapsed" Margin="0,0,0,8"/>
+                                <WrapPanel Name="ClockPictureModePanel" Orientation="Horizontal"/>
                             </StackPanel>
                         </Border>
-                    </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
 
                     <!-- Add Device Button (Bottom Center of whole Device area) -->
                     <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="AddDeviceBottomButton" Content="Add Device"
                               Style="{StaticResource RoundedRectButtonStyle}" Padding="20,12" Background="#4CAF50"
                               FontSize="12" Margin="0,15,0,0" Width="200" HorizontalAlignment="Center"
                            Click="AddDevice_Click"/>
+
+                    <!-- Apply Button (Clock Style tab) -->
+                    <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockApplyButton" Content="Apply"
+                              Style="{StaticResource RoundedRectButtonStyle}" Padding="20,12" Background="#4CAF50"
+                              FontSize="12" Margin="0,15,0,0" Width="200" HorizontalAlignment="Center"
+                              Visibility="Collapsed"
+                           Click="ClockApply_Click"/>
                 </Grid>
             </Grid>
         </Grid>

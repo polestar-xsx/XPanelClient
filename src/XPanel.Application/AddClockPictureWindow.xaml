@@ -1,0 +1,165 @@
+<Window x:Class="XPanel.Application.AddClockPictureWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:XPanel.Application"
+        Title="Add Picture"
+        SizeToContent="WidthAndHeight"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="#F8F9FA">
+    <Window.Resources>
+        <Style x:Key="DialogButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="20,10"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <StackPanel Margin="20">
+        <StackPanel Orientation="Horizontal">
+            <!-- Dot-matrix preview -->
+            <Border Name="PreviewArea"
+                    Width="320" Height="320"
+                    Background="#0A0A0A"
+                    CornerRadius="8"
+                    ClipToBounds="True"
+                    Cursor="SizeAll"
+                    MouseWheel="PreviewArea_MouseWheel"
+                    MouseLeftButtonDown="PreviewArea_MouseLeftButtonDown"
+                    MouseMove="PreviewArea_MouseMove"
+                    MouseLeftButtonUp="PreviewArea_MouseLeftButtonUp">
+                <local:LedMatrixDisplay x:Name="PreviewMatrix"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+            </Border>
+
+            <!-- Color palette -->
+            <StackPanel Margin="15,0,0,0" VerticalAlignment="Top">
+                <Grid Margin="0,0,0,8">
+                    <TextBlock Text="Palette" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                    <Border Name="EyedropperButton" HorizontalAlignment="Right" VerticalAlignment="Center"
+                            Width="30" Height="30" CornerRadius="6" Background="Transparent"
+                            BorderBrush="#CCCCCC" BorderThickness="1" Cursor="Hand"
+                            ToolTip="Eyedropper: click a preview pixel to pick its color"
+                            MouseLeftButtonDown="Eyedropper_Click">
+                        <Image Source="pack://application:,,,/Resources/dropper.png" Width="18" Height="18" Stretch="Uniform"/>
+                    </Border>
+                </Grid>
+                <WrapPanel Name="BasicColorPanel" Width="184"/>
+                <TextBlock Text="Custom" FontWeight="Bold" Foreground="#333" Margin="0,14,0,8"/>
+                <WrapPanel Name="CustomColorPanel" Width="184"/>
+                <Grid Margin="0,14,0,0" Width="184">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Cartoon" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                    <Slider Grid.Column="1" Name="CartoonStrengthSlider" Minimum="0" Maximum="10" Value="0"
+                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                            Margin="8,0,8,0" ValueChanged="CartoonStrengthSlider_ValueChanged"/>
+                    <TextBlock Grid.Column="2" Name="CartoonStrengthText" Text="0" Foreground="#333"
+                               VerticalAlignment="Center" MinWidth="14" TextAlignment="Right"/>
+                </Grid>
+                <CheckBox Name="BeadEnabledCheck" Content="Bead (pixel palette)" Foreground="#333"
+                          Margin="0,12,0,0" Checked="BeadEnabled_Changed" Unchecked="BeadEnabled_Changed"/>
+                <Grid Margin="0,8,0,0" Width="184">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Colors" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                    <Slider Grid.Column="1" Name="BeadColorSlider" Minimum="2" Maximum="32" Value="16"
+                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                            Margin="8,0,8,0" ValueChanged="BeadColorSlider_ValueChanged"/>
+                    <TextBlock Grid.Column="2" Name="BeadColorText" Text="16" Foreground="#333"
+                               VerticalAlignment="Center" MinWidth="14" TextAlignment="Right"/>
+                </Grid>
+                <CheckBox Name="BeadDitherCheck" Content="Dither" Foreground="#333"
+                          Margin="0,8,0,0" Checked="BeadDither_Changed" Unchecked="BeadDither_Changed"/>
+                <CheckBox Name="OutlineCheck" Content="Black outline" Foreground="#333"
+                          Margin="0,8,0,0" Checked="Outline_Changed" Unchecked="Outline_Changed"/>
+                <Grid Margin="0,8,0,0" Width="184">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Edge" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                    <Slider Grid.Column="1" Name="OutlineThresholdSlider" Minimum="40" Maximum="300" Value="150"
+                            VerticalAlignment="Center" Margin="8,0,8,0" ValueChanged="OutlineThresholdSlider_ValueChanged"/>
+                    <TextBlock Grid.Column="2" Name="OutlineThresholdText" Text="150" Foreground="#333"
+                               VerticalAlignment="Center" MinWidth="22" TextAlignment="Right"/>
+                </Grid>
+                <Grid Margin="0,10,0,0" Width="184">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Brush" FontWeight="Bold" Foreground="#333" VerticalAlignment="Center"/>
+                    <Slider Grid.Column="1" Name="BrushSizeSlider" Minimum="1" Maximum="8" Value="1"
+                            IsSnapToTickEnabled="True" TickFrequency="1" VerticalAlignment="Center"
+                            Margin="8,0,8,0" ValueChanged="BrushSizeSlider_ValueChanged"/>
+                    <TextBlock Grid.Column="2" Name="BrushSizeText" Text="1" Foreground="#333"
+                               VerticalAlignment="Center" MinWidth="14" TextAlignment="Right"/>
+                </Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                    <Button Name="UndoButton" Width="48" Height="34" Padding="4"
+                            Style="{StaticResource DialogButtonStyle}" Background="#607D8B" Margin="0,0,8,0"
+                            IsEnabled="False" ToolTip="Undo" Click="Undo_Click">
+                        <Path Width="20" Height="20" Stretch="Uniform" Fill="White"
+                              Data="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
+                    </Button>
+                    <Button Name="RedoButton" Width="48" Height="34" Padding="4"
+                            Style="{StaticResource DialogButtonStyle}" Background="#607D8B"
+                            IsEnabled="False" ToolTip="Redo" Click="Redo_Click">
+                        <Path Width="20" Height="20" Stretch="Uniform" Fill="White"
+                              Data="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0-8.58 3.03-9.96 7.22L3.9 16c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 16h9V7l-3.6 3.6z"/>
+                    </Button>
+                </StackPanel>
+            </StackPanel>
+        </StackPanel>
+
+        <TextBlock Name="HintText"
+                   Text="Scroll to zoom · Drag to move"
+                   Foreground="#999" FontSize="11" TextAlignment="Center"
+                   Margin="0,10,0,0"/>
+
+        <!-- Action buttons -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,15,0,0">
+            <Button Content="Chose Picture" Width="120" Style="{StaticResource DialogButtonStyle}"
+                    Background="#2196F3" Margin="0,0,10,0" Click="ChosePicture_Click"/>
+            <Button Content="OK" Width="120" Style="{StaticResource DialogButtonStyle}"
+                    Background="#4CAF50" Margin="0,0,10,0" Click="Ok_Click"/>
+            <Button Name="PaintButton" Content="Paint" Width="120" Style="{StaticResource DialogButtonStyle}"
+                    Background="#FF9800" Click="Paint_Click"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

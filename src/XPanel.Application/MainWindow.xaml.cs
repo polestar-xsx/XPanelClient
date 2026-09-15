@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -1903,6 +1904,8 @@ namespace XPanel.Application
         private readonly object _weatherSyncLock = new();
         private readonly WeatherService _weatherService = new();
         private static readonly TimeSpan WeatherSyncInterval = TimeSpan.FromMinutes(10);
+        private readonly DispatcherTimer _clockGifPreviewTimer = new() { Interval = TimeSpan.FromMilliseconds(20) };
+        private readonly List<ClockGifPreviewState> _clockGifPreviews = new();
 
         // Static method for logging
         public static void WriteAppLog(string message, string category = "General")
@@ -1935,6 +1938,7 @@ namespace XPanel.Application
         public MainWindow()
         {
             InitializeComponent();
+            _clockGifPreviewTimer.Tick += ClockGifPreviewTimer_Tick;
             WriteAppLog("=== MainWindow Initialized ===", "Startup");
             InitializeTrayIcon();
             // 启动时隐藏窗口到系统托盘
@@ -2096,6 +2100,7 @@ namespace XPanel.Application
                 // 切换到新设备
                 _selectedDeviceKey = channelKey;
                 RefreshSyncItemsUi();
+                ApplyClockSettingsToUi(channelKey);
                 SaveSavedDevicesToConfig();
             }
         }
@@ -2231,7 +2236,12 @@ namespace XPanel.Application
                 SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
                 SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 3 ? Visibility.Visible : Visibility.Collapsed;
                 ClockStylePanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+                if (LeftTabControl.SelectedIndex != 2)
+                {
+                    _clockGifPreviewTimer.Stop();
+                }
                 AddDeviceBottomButton.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+                ClockApplyButton.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
                 DeviceSelectorPanel.Visibility = (LeftTabControl.SelectedIndex == 1 || LeftTabControl.SelectedIndex == 2) ? Visibility.Visible : Visibility.Collapsed;
 
                 // 当切换到Synchronization页面时，刷新UI
@@ -2250,6 +2260,7 @@ namespace XPanel.Application
                     {
                         DeviceSelector.SelectedIndex = 0;
                     }
+                    LoadClockPictureModes();
                 }
             }
         }
@@ -2269,7 +2280,42 @@ namespace XPanel.Application
                     var c = dialog.Color;
                     ClockFontColorSwatch.Background = new SolidColorBrush(
                         System.Windows.Media.Color.FromArgb(c.A, c.R, c.G, c.B));
+                    LoadClockPictureModes();
                 }
+            }
+        }
+
+        private void ClockXSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (ClockXText != null)
+            {
+                ClockXText.Text = ((int)Math.Round(e.NewValue)).ToString();
+            }
+
+            if (IsLoaded && ClockStylePanel.Visibility == Visibility.Visible)
+            {
+                LoadClockPictureModes();
+            }
+        }
+
+        private void ClockYSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (ClockYText != null)
+            {
+                ClockYText.Text = ((int)Math.Round(e.NewValue)).ToString();
+            }
+
+            if (IsLoaded && ClockStylePanel.Visibility == Visibility.Visible)
+            {
+                LoadClockPictureModes();
+            }
+        }
+
+        private void ClockFontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (IsLoaded && ClockStylePanel.Visibility == Visibility.Visible)
+            {
+                LoadClockPictureModes();
             }
         }
 
@@ -2590,6 +2636,9 @@ namespace XPanel.Application
 
         private string _selectedClockBackgroundMode = string.Empty;
 
+        // Picture Mode 里的"添加图片"按钮，选中高亮时需要跳过它
+        private Border? _clockAddImageBorder;
+
         private void ClockBackgroundMode_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             if (sender is not Border clicked)
@@ -2598,17 +2647,922 @@ namespace XPanel.Application
             }
 
             _selectedClockBackgroundMode = clicked.Tag as string ?? string.Empty;
+            _selectedClockPictureMode = string.Empty;
+            HighlightSelectedClockItem(clicked);
+        }
 
-            var highlight = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x21, 0x96, 0xF3));
-            var normal = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0));
+        private void ApplyClockSettingsToUi(string channelKey)
+        {
+            if (!_savedDevices.TryGetValue(channelKey, out var device))
+            {
+                return;
+            }
 
+            ClockSettings settings = device.Clock;
+            ClockFontCombo.SelectedIndex = settings.FontIndex == 1 ? 0 : 1;
+            ClockXSlider.Value = Math.Clamp(settings.PositionX, 0, 31);
+            ClockYSlider.Value = Math.Clamp(settings.PositionY, 0, 31);
+
+            byte red = (byte)((settings.ColorRgb >> 16) & 0xFF);
+            byte green = (byte)((settings.ColorRgb >> 8) & 0xFF);
+            byte blue = (byte)(settings.ColorRgb & 0xFF);
+            ClockFontColorSwatch.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(red, green, blue));
+
+            _selectedClockBackgroundMode = settings.BackgroundMode switch
+            {
+                1 => "Matrix",
+                2 => "GravityBall",
+                3 => "Music",
+                _ => string.Empty,
+            };
+            _selectedClockPictureMode = string.Empty;
             foreach (var child in ClockBackgroundModePanel.Children)
             {
                 if (child is Border border)
                 {
-                    border.BorderBrush = ReferenceEquals(border, clicked) ? highlight : normal;
+                    bool selected = string.Equals(border.Tag as string, _selectedClockBackgroundMode, StringComparison.Ordinal);
+                    border.BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(
+                        selected ? (byte)0x21 : (byte)0xE0,
+                        selected ? (byte)0x96 : (byte)0xE0,
+                        selected ? (byte)0xF3 : (byte)0xE0));
                 }
             }
+
+            LoadClockPictureModes();
+        }
+
+        private void HighlightSelectedClockItem(Border selected)
+        {
+            var highlight = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x21, 0x96, 0xF3));
+            var normal = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0));
+
+            foreach (var panel in new[] { ClockBackgroundModePanel, ClockPictureModePanel })
+            {
+                foreach (var child in panel.Children)
+                {
+                    if (child is Border border && !ReferenceEquals(border, _clockAddImageBorder))
+                    {
+                        border.BorderBrush = ReferenceEquals(border, selected) ? highlight : normal;
+                    }
+                }
+            }
+        }
+
+        // Bold 时钟字模：6 宽 x 10 高，与显示端 kGlyphs 一致
+        private const int ClockBoldWidth = 6;
+        private const int ClockBoldHeight = 10;
+
+        private static readonly byte[][] ClockBoldGlyphs =
+        {
+            new byte[] { 0x1E, 0x3F, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F, 0x1E }, // 0
+            new byte[] { 0x0C, 0x1C, 0x1C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x1E }, // 1
+            new byte[] { 0x1E, 0x3F, 0x33, 0x33, 0x07, 0x0E, 0x1C, 0x38, 0x3F, 0x3F }, // 2
+            new byte[] { 0x1E, 0x3F, 0x33, 0x03, 0x1F, 0x1E, 0x03, 0x33, 0x3F, 0x1E }, // 3
+            new byte[] { 0x06, 0x0E, 0x1E, 0x3E, 0x36, 0x3F, 0x3F, 0x06, 0x06, 0x06 }, // 4
+            new byte[] { 0x3F, 0x3F, 0x30, 0x30, 0x3E, 0x3F, 0x03, 0x03, 0x3F, 0x3E }, // 5
+            new byte[] { 0x1E, 0x3F, 0x33, 0x30, 0x3E, 0x3F, 0x33, 0x33, 0x3F, 0x1E }, // 6
+            new byte[] { 0x3F, 0x3F, 0x03, 0x03, 0x06, 0x06, 0x0C, 0x0C, 0x18, 0x18 }, // 7
+            new byte[] { 0x1E, 0x3F, 0x33, 0x33, 0x3F, 0x1E, 0x33, 0x33, 0x3F, 0x1E }, // 8
+            new byte[] { 0x1E, 0x3F, 0x33, 0x33, 0x3F, 0x1F, 0x03, 0x33, 0x3F, 0x1E }, // 9
+        };
+
+        // Normal 时钟字模：5 宽 x 8 高
+        private const int ClockNormalWidth = 5;
+        private const int ClockNormalHeight = 8;
+
+        private static readonly byte[][] ClockNormalGlyphs =
+        {
+            new byte[] { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E }, // 0
+            new byte[] { 0x04, 0x1C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F }, // 1
+            new byte[] { 0x0E, 0x11, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F }, // 2
+            new byte[] { 0x0E, 0x11, 0x01, 0x0E, 0x01, 0x01, 0x11, 0x0E }, // 3
+            new byte[] { 0x02, 0x06, 0x0A, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, // 4
+            new byte[] { 0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, // 5
+            new byte[] { 0x0E, 0x11, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x0E }, // 6
+            new byte[] { 0x1F, 0x01, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, // 7
+            new byte[] { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x11, 0x0E }, // 8
+            new byte[] { 0x0E, 0x11, 0x11, 0x11, 0x0F, 0x01, 0x11, 0x0E }, // 9
+        };
+
+        private string _selectedClockPictureMode = string.Empty;
+
+        private void LoadClockPictureModes()
+        {
+            _clockGifPreviewTimer.Stop();
+            _clockGifPreviews.Clear();
+            ClockPictureModePanel.Children.Clear();
+            _clockAddImageBorder = null;
+
+            string directory = Path.Combine(AppContext.BaseDirectory, "resources", "ClockBackground");
+            var supportedExtensions = new[] { ".png", ".bmp", ".jpg", ".jpeg", ".gif" };
+            var files = Directory.Exists(directory)
+                ? Directory.EnumerateFiles(directory)
+                    .Where(f => supportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                    .OrderBy(f => Path.GetFileName(f))
+                    .ToList()
+                : new List<string>();
+
+            ClockPictureModeEmptyText.Visibility = files.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            var fontColor = ClockFontColorSwatch.Background is SolidColorBrush brush
+                ? brush.Color
+                : System.Windows.Media.Colors.White;
+
+            int clockX = (int)Math.Round(ClockXSlider.Value);
+            int clockY = (int)Math.Round(ClockYSlider.Value);
+            bool bold = !(ClockFontCombo.SelectedItem is ComboBoxItem fontItem && (fontItem.Content as string) == "Normal");
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    IReadOnlyList<ClockPreviewFrame> frames = LoadClockPreviewFrames(
+                        file,
+                        fontColor.R,
+                        fontColor.G,
+                        fontColor.B,
+                        clockX,
+                        clockY,
+                        bold);
+                    if (frames.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var preview = new LedMatrixDisplay
+                    {
+                        LedCellSize = 4,
+                        LedDiameter = 3,
+                        SourceBitmap = frames[0].Bitmap,
+                    };
+                    if (preview.RenderedBitmap == null)
+                    {
+                        continue;
+                    }
+
+                    var itemPanel = new StackPanel { Margin = new Thickness(8) };
+                    itemPanel.Children.Add(preview);
+                    itemPanel.Children.Add(new TextBlock
+                    {
+                        Text = Path.GetFileNameWithoutExtension(file),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        FontSize = 12,
+                        FontWeight = FontWeights.SemiBold,
+                        Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x33, 0x33, 0x33)),
+                        Margin = new Thickness(0, 8, 0, 0),
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        MaxWidth = 130,
+                    });
+
+                    var border = new Border
+                    {
+                        Tag = file,
+                        Margin = new Thickness(0, 0, 15, 15),
+                        BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                        BorderThickness = new Thickness(2),
+                        CornerRadius = new CornerRadius(8),
+                        Cursor = System.Windows.Input.Cursors.Hand,
+                        Child = itemPanel,
+                    };
+                    border.MouseLeftButtonUp += ClockPictureMode_Click;
+
+                    ClockPictureModePanel.Children.Add(border);
+                    if (frames.Count > 1)
+                    {
+                        _clockGifPreviews.Add(new ClockGifPreviewState(preview, frames));
+                    }
+                }
+                catch
+                {
+                    // 跳过无法加载的图片
+                }
+            }
+
+            AppendClockAddImageButton();
+            if (_clockGifPreviews.Count > 0 && ClockStylePanel.Visibility == Visibility.Visible)
+            {
+                _clockGifPreviewTimer.Start();
+            }
+        }
+
+        private void ClockGifPreviewTimer_Tick(object? sender, EventArgs e)
+        {
+            DateTime now = DateTime.UtcNow;
+            foreach (ClockGifPreviewState state in _clockGifPreviews)
+            {
+                if (now < state.NextFrameAtUtc)
+                {
+                    continue;
+                }
+
+                state.FrameIndex = (state.FrameIndex + 1) % state.Frames.Count;
+                ClockPreviewFrame frame = state.Frames[state.FrameIndex];
+                state.Preview.SourceBitmap = frame.Bitmap;
+                state.NextFrameAtUtc = now.AddMilliseconds(frame.DelayMilliseconds);
+            }
+        }
+
+        private void AppendClockAddImageButton()
+        {
+            var plus = new TextBlock
+            {
+                Text = "+",
+                FontSize = 64,
+                FontWeight = FontWeights.Light,
+                Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x99, 0x99, 0x99)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            var addBorder = new Border
+            {
+                Width = 144,
+                Height = 144,
+                Margin = new Thickness(0, 0, 15, 15),
+                Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFA, 0xFA, 0xFA)),
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xCC, 0xCC, 0xCC)),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(8),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Child = plus,
+            };
+            addBorder.MouseLeftButtonUp += ClockAddImage_Click;
+
+            _clockAddImageBorder = addBorder;
+            ClockPictureModePanel.Children.Add(addBorder);
+        }
+
+        private void ClockPictureMode_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (sender is not Border clicked)
+            {
+                return;
+            }
+
+            _selectedClockPictureMode = clicked.Tag as string ?? string.Empty;
+            _selectedClockBackgroundMode = string.Empty;
+            HighlightSelectedClockItem(clicked);
+        }
+
+        private void ClockAddImage_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            var dialog = new AddClockPictureWindow { Owner = this };
+            if (dialog.ShowDialog() == true)
+            {
+                LoadClockPictureModes();
+            }
+        }
+
+        private async void ClockApply_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Button applyButton)
+            {
+                return;
+            }
+
+            string channelKey = _selectedDeviceKey;
+            if (string.IsNullOrWhiteSpace(channelKey) || !_savedDevices.TryGetValue(channelKey, out var device))
+            {
+                System.Windows.MessageBox.Show("请先选择一个设备。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (!_connectedDevices.TryGetValue(channelKey, out var connected) ||
+                connected.Status != DeviceConnectionVisualState.Connected ||
+                !connected.SessionId.HasValue ||
+                connected.CommunicationChannel == null)
+            {
+                System.Windows.MessageBox.Show("设备未连接，无法下发时钟样式。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            ClockSettings settings = GatherClockSettingsFromUi(device.Clock);
+
+            applyButton.IsEnabled = false;
+            try
+            {
+                bool ok;
+                if (settings.BackgroundMode == 11)
+                {
+                    if (string.IsNullOrEmpty(_selectedClockPictureMode) || !File.Exists(_selectedClockPictureMode))
+                    {
+                        System.Windows.MessageBox.Show("请先选择要发送的背景图片。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
+                        return;
+                    }
+
+                    using var imageCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                    ok = await SendClockImageAsync(
+                        connected.CommunicationChannel,
+                        connected.SessionId.Value,
+                        settings,
+                        _selectedClockPictureMode,
+                        imageCts.Token);
+                }
+                else
+                {
+                    ok = await WriteClockSettingsToDeviceAsync(
+                        connected.CommunicationChannel,
+                        connected.SessionId.Value,
+                        settings);
+                }
+
+                if (ok)
+                {
+                    device.Clock = settings;
+                    SaveSavedDevicesToConfig();
+                    System.Windows.MessageBox.Show("时钟样式已下发到设备。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    System.Windows.MessageBox.Show("时钟样式下发失败，请重试。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"Clock apply failed: key={channelKey}, reason={ex.Message}", "ClockConfig");
+                System.Windows.MessageBox.Show($"时钟样式下发出现异常：{ex.Message}", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                applyButton.IsEnabled = true;
+            }
+        }
+
+        // 从时钟样式界面采集当前设置，未选择背景时保留原背景模式。
+        private ClockSettings GatherClockSettingsFromUi(ClockSettings current)
+        {
+            int fontIndex = ClockFontCombo.SelectedItem is ComboBoxItem fontItem && (fontItem.Content as string) == "Normal"
+                ? 1
+                : 0;
+
+            var color = ClockFontColorSwatch.Background is SolidColorBrush brush
+                ? brush.Color
+                : System.Windows.Media.Colors.White;
+            int colorRgb = (color.R << 16) | (color.G << 8) | color.B;
+
+            int posX = Math.Clamp((int)Math.Round(ClockXSlider.Value), 0, 31);
+            int posY = Math.Clamp((int)Math.Round(ClockYSlider.Value), 0, 31);
+
+            int backgroundMode;
+            if (!string.IsNullOrEmpty(_selectedClockPictureMode))
+            {
+                backgroundMode = 11;
+            }
+            else
+            {
+                backgroundMode = _selectedClockBackgroundMode switch
+                {
+                    "Matrix" => 1,
+                    "GravityBall" => 2,
+                    "Music" => 3,
+                    _ => current.BackgroundMode,
+                };
+            }
+
+            return new ClockSettings
+            {
+                FontIndex = fontIndex,
+                BackgroundMode = backgroundMode,
+                ColorRgb = colorRgb & 0x00FFFFFF,
+                PositionX = posX,
+                PositionY = posY,
+            };
+        }
+
+        // 按协议 §13 通过 nvm.write 逐项下发时钟配置项。
+        private async Task<bool> WriteClockSettingsToDeviceAsync(ICommunicationChannel channel, uint sessionId, ClockSettings settings)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+            var items = new (ushort CfgId, int Value)[]
+            {
+                (XpfProtocolConstants.CfgIdClockFont, settings.FontIndex),
+                (XpfProtocolConstants.CfgIdClockBackgroundMode, settings.BackgroundMode),
+                (XpfProtocolConstants.CfgIdClockColorRgb, settings.ColorRgb & 0x00FFFFFF),
+                (XpfProtocolConstants.CfgIdClockPositionX, settings.PositionX),
+                (XpfProtocolConstants.CfgIdClockPositionY, settings.PositionY),
+            };
+
+            bool allOk = true;
+            foreach (var item in items)
+            {
+                bool ok = await TryWriteSingleConfigValueAsync(channel, sessionId, item.CfgId, item.Value, cts.Token);
+                if (!ok)
+                {
+                    allOk = false;
+                }
+            }
+
+            return allOk;
+        }
+
+        // 通过 nvm.write 写入单个 int32 配置项；成功返回 true，失败/被拒/超时返回 false。
+        private async Task<bool> TryWriteSingleConfigValueAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            ushort cfgId,
+            int value,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+            var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(256);
+
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    while (TryExtractFirstXpfFrame(receiveBuffer, out var frameBytes))
+                    {
+                        try
+                        {
+                            var frame = XpfCodec.Deserialize(frameBytes);
+                            if (!XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) ||
+                                ackForMsgId != msgId)
+                            {
+                                continue;
+                            }
+
+                            if (frame.MessageType == XpfMessageType.Ack)
+                            {
+                                WriteAppLog($"NVM write ACK received: cfg=0x{cfgId:X4}, msgId={msgId}; waiting for RESP/ERROR", "ClockConfig");
+                                continue;
+                            }
+
+                            if (frame.OpCode == XpfProtocolConstants.OpNvmWrite &&
+                                (frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error))
+                            {
+                                WriteAppLog($"NVM write {frame.MessageType} received: cfg=0x{cfgId:X4}, msgId={msgId}", "ClockConfig");
+                                responseTcs.TrySetResult(frame);
+                                return;
+                            }
+                        }
+                        catch
+                        {
+                            // 忽略非目标 XPF 帧。
+                        }
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+
+            try
+            {
+                await channel.StartReceivingAsync(cancellationToken);
+
+                var frame = new XpfFrame
+                {
+                    MessageType = XpfMessageType.Cmd,
+                    Flags = 0x01,
+                    QosLevel = 1,
+                    Hop = 0,
+                    AppId = XpfProtocolConstants.AppIdNvmMgr,
+                    OpCode = XpfProtocolConstants.OpNvmWrite,
+                    MsgId = msgId,
+                    TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                };
+
+                frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+                frame.Tlvs[XpfProtocolConstants.TlvCfgScope] = new[] { XpfProtocolConstants.CfgScopeDeviceNvm };
+                frame.Tlvs[XpfProtocolConstants.TlvCfgCount] = new byte[] { 1 };
+                frame.Tlvs[XpfProtocolConstants.TlvCfgId] = XpfCodec.EncodeUInt16(cfgId);
+                frame.Tlvs[XpfProtocolConstants.TlvCfgValueType] = new byte[] { XpfProtocolConstants.CfgValueTypeInt32 };
+                frame.Tlvs[XpfProtocolConstants.TlvCfgValue] = XpfCodec.EncodeUInt32(unchecked((uint)value));
+
+                WriteAppLog($"NVM write sending: cfg=0x{cfgId:X4}, value={value}, msgId={msgId}, session={sessionId}", "ClockConfig");
+                bool sent = await channel.SendAsync(XpfCodec.Serialize(frame), cancellationToken);
+                if (!sent)
+                {
+                    WriteAppLog($"NVM write send failed: cfg=0x{cfgId:X4}, msgId={msgId}", "ClockConfig");
+                    return false;
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(3));
+                using var reg = timeoutCts.Token.Register(() => responseTcs.TrySetCanceled(timeoutCts.Token));
+
+                XpfFrame response;
+                try
+                {
+                    response = await responseTcs.Task;
+                }
+                catch (OperationCanceledException)
+                {
+                    WriteAppLog($"NVM write RESP timeout: cfg=0x{cfgId:X4}, msgId={msgId}", "ClockConfig");
+                    return false;
+                }
+
+                if (response.MessageType == XpfMessageType.Error)
+                {
+                    return false;
+                }
+
+                // 单项状态非 0 视为写入失败（未找到/类型不符/拒绝等）。
+                if (response.Tlvs.TryGetValue(XpfProtocolConstants.TlvCfgItemStatus, out var statusBytes) &&
+                    statusBytes.Length == 1 &&
+                    statusBytes[0] != 0)
+                {
+                    WriteAppLog($"NVM write item status non-zero: cfg=0x{cfgId:X4}, status={statusBytes[0]}", "ClockConfig");
+                    return false;
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
+        }
+
+        // 按协议 §15 图片模式：clock.config_set -> clock.bg_chunk* -> clock.config_commit。
+        private async Task<bool> SendClockImageAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            ClockSettings settings,
+            string imagePath,
+            CancellationToken cancellationToken)
+        {
+            byte formatCode = GetClockImageFormatCode(imagePath);
+            if (formatCode == 0)
+            {
+                WriteAppLog($"Unsupported clock image format: {Path.GetExtension(imagePath)}", "ClockImage");
+                return false;
+            }
+
+            byte[] fileBytes = await File.ReadAllBytesAsync(imagePath, cancellationToken);
+            if (fileBytes.Length == 0)
+            {
+                WriteAppLog($"Clock image is empty: {imagePath}", "ClockImage");
+                return false;
+            }
+
+            if (!TryGetImagePixelSize(imagePath, out int width, out int height))
+            {
+                WriteAppLog($"Cannot read clock image size: {imagePath}", "ClockImage");
+                return false;
+            }
+
+            uint crc32 = ComputeCrc32(fileBytes);
+            uint transferId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+            const int chunkSize = 160;
+            int chunkTotal = (fileBytes.Length + chunkSize - 1) / chunkSize;
+
+            WriteAppLog($"Clock image transfer begin: transferId={transferId}, size={fileBytes.Length}, chunks={chunkTotal}, {width}x{height}, fmt={formatCode}", "ClockImage");
+
+            var configSet = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                AppId = XpfProtocolConstants.AppIdClock,
+                OpCode = XpfProtocolConstants.OpClockConfigSet,
+                MsgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue),
+                TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            };
+            configSet.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+            configSet.Tlvs[XpfProtocolConstants.TlvClockFontIndex] = new[] { (byte)settings.FontIndex };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockX] = new[] { (byte)Math.Clamp(settings.PositionX, 0, 255) };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockY] = new[] { (byte)Math.Clamp(settings.PositionY, 0, 255) };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockColorRgb] = new[]
+            {
+                (byte)((settings.ColorRgb >> 16) & 0xFF),
+                (byte)((settings.ColorRgb >> 8) & 0xFF),
+                (byte)(settings.ColorRgb & 0xFF),
+            };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockBgMode] = new byte[] { 11 };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockImageFormat] = new[] { formatCode };
+            configSet.Tlvs[XpfProtocolConstants.TlvClockImageSize] = XpfCodec.EncodeUInt32((uint)fileBytes.Length);
+            configSet.Tlvs[XpfProtocolConstants.TlvClockTransferId] = XpfCodec.EncodeUInt32(transferId);
+            configSet.Tlvs[XpfProtocolConstants.TlvClockImageWidth] = XpfCodec.EncodeUInt16((ushort)width);
+            configSet.Tlvs[XpfProtocolConstants.TlvClockImageHeight] = XpfCodec.EncodeUInt16((ushort)height);
+            configSet.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
+            configSet.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
+
+            if (!await SendClockRequestAwaitRespAsync(channel, configSet, "clock.config_set", cancellationToken))
+            {
+                return false;
+            }
+
+            for (int index = 0; index < chunkTotal; index++)
+            {
+                int offset = index * chunkSize;
+                int length = Math.Min(chunkSize, fileBytes.Length - offset);
+                byte[] chunk = new byte[length];
+                Buffer.BlockCopy(fileBytes, offset, chunk, 0, length);
+
+                var chunkFrame = new XpfFrame
+                {
+                    MessageType = XpfMessageType.Cmd,
+                    Flags = 0x01,
+                    QosLevel = 1,
+                    AppId = XpfProtocolConstants.AppIdClock,
+                    OpCode = XpfProtocolConstants.OpClockBgChunk,
+                    MsgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue),
+                    TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                };
+                chunkFrame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+                chunkFrame.Tlvs[XpfProtocolConstants.TlvClockTransferId] = XpfCodec.EncodeUInt32(transferId);
+                chunkFrame.Tlvs[XpfProtocolConstants.TlvChunkIndex] = XpfCodec.EncodeUInt16((ushort)index);
+                chunkFrame.Tlvs[XpfProtocolConstants.TlvClockImageData] = chunk;
+
+                if (!await SendClockRequestAwaitRespAsync(channel, chunkFrame, $"clock.bg_chunk[{index + 1}/{chunkTotal}]", cancellationToken))
+                {
+                    return false;
+                }
+            }
+
+            var commit = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                AppId = XpfProtocolConstants.AppIdClock,
+                OpCode = XpfProtocolConstants.OpClockConfigCommit,
+                MsgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue),
+                TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            };
+            commit.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+            commit.Tlvs[XpfProtocolConstants.TlvClockTransferId] = XpfCodec.EncodeUInt32(transferId);
+            commit.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
+            commit.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
+
+            bool committed = await SendClockRequestAwaitRespAsync(channel, commit, "clock.config_commit", cancellationToken);
+            WriteAppLog($"Clock image transfer {(committed ? "committed" : "failed")}: transferId={transferId}", "ClockImage");
+            return committed;
+        }
+
+        // 发送单个时钟请求帧并等待与 msg_id 匹配的 RESP/ERROR；ACK 仅记录，超时/ERROR 返回 false。
+        private async Task<bool> SendClockRequestAwaitRespAsync(
+            ICommunicationChannel channel,
+            XpfFrame request,
+            string logContext,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = request.MsgId;
+            var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(256);
+
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    while (TryExtractFirstXpfFrame(receiveBuffer, out var frameBytes))
+                    {
+                        try
+                        {
+                            var frame = XpfCodec.Deserialize(frameBytes);
+                            if (!XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) ||
+                                ackForMsgId != msgId)
+                            {
+                                continue;
+                            }
+
+                            if (frame.MessageType == XpfMessageType.Ack)
+                            {
+                                WriteAppLog($"{logContext} ACK received: msgId={msgId}; waiting for RESP/ERROR", "ClockImage");
+                                continue;
+                            }
+
+                            if (frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error)
+                            {
+                                WriteAppLog($"{logContext} {frame.MessageType} received: msgId={msgId}", "ClockImage");
+                                responseTcs.TrySetResult(frame);
+                                return;
+                            }
+                        }
+                        catch
+                        {
+                            // 忽略非目标 XPF 帧。
+                        }
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+
+            try
+            {
+                await channel.StartReceivingAsync(cancellationToken);
+
+                WriteAppLog($"{logContext} sending: msgId={msgId}", "ClockImage");
+                bool sent = await channel.SendAsync(XpfCodec.Serialize(request), cancellationToken);
+                if (!sent)
+                {
+                    WriteAppLog($"{logContext} send failed: msgId={msgId}", "ClockImage");
+                    return false;
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                using var reg = timeoutCts.Token.Register(() => responseTcs.TrySetCanceled(timeoutCts.Token));
+
+                XpfFrame response;
+                try
+                {
+                    response = await responseTcs.Task;
+                }
+                catch (OperationCanceledException)
+                {
+                    WriteAppLog($"{logContext} RESP timeout: msgId={msgId}", "ClockImage");
+                    return false;
+                }
+
+                if (response.MessageType == XpfMessageType.Error)
+                {
+                    if (XpfCodec.TryReadUInt16(response.Tlvs, XpfProtocolConstants.TlvErrCode, out ushort errCode))
+                    {
+                        WriteAppLog($"{logContext} error: msgId={msgId}, errCode={errCode}", "ClockImage");
+                    }
+
+                    return false;
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
+        }
+
+        private static byte GetClockImageFormatCode(string imagePath)
+        {
+            return Path.GetExtension(imagePath).ToLowerInvariant() switch
+            {
+                ".png" => 1,
+                ".jpg" => 2,
+                ".jpeg" => 3,
+                ".bmp" => 4,
+                ".gif" => 5,
+                ".webp" => 6,
+                _ => 0,
+            };
+        }
+
+        private static bool TryGetImagePixelSize(string imagePath, out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+            try
+            {
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                image.UriSource = new Uri(imagePath, UriKind.Absolute);
+                image.EndInit();
+                width = image.PixelWidth;
+                height = image.PixelHeight;
+                return width > 0 && height > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static IReadOnlyList<ClockPreviewFrame> LoadClockPreviewFrames(
+            string filePath,
+            byte red,
+            byte green,
+            byte blue,
+            int clockX,
+            int clockY,
+            bool bold)
+        {
+            if (!string.Equals(Path.GetExtension(filePath), ".gif", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { new ClockPreviewFrame(BuildClockPreviewBitmap(filePath, red, green, blue, clockX, clockY, bold), 100) };
+            }
+
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var decoder = new GifBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+            return decoder.Frames
+                .Select(frame => new ClockPreviewFrame(
+                    BuildClockPreviewBitmap(frame, red, green, blue, clockX, clockY, bold),
+                    GetClockGifFrameDelay(frame.Metadata as BitmapMetadata)))
+                .ToList();
+        }
+
+        private static int GetClockGifFrameDelay(BitmapMetadata? metadata)
+        {
+            try
+            {
+                object? value = metadata?.GetQuery("/grctlext/Delay");
+                return Math.Max(20, Convert.ToInt32(value ?? 10) * 10);
+            }
+            catch
+            {
+                return 100;
+            }
+        }
+
+        // 加载背景图并叠加 12:00 时钟数字，供 LED 预览渲染
+        private static WriteableBitmap BuildClockPreviewBitmap(string filePath, byte r, byte g, byte b, int clockX, int clockY, bool bold)
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            image.UriSource = new Uri(filePath, UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+
+            return BuildClockPreviewBitmap(image, r, g, b, clockX, clockY, bold);
+        }
+
+        private static WriteableBitmap BuildClockPreviewBitmap(BitmapSource source, byte r, byte g, byte b, int clockX, int clockY, bool bold)
+        {
+            var converted = new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
+            int width = converted.PixelWidth;
+            int height = converted.PixelHeight;
+            int stride = width * 4;
+            var pixels = new byte[height * stride];
+            converted.CopyPixels(pixels, stride, 0);
+
+            DrawClock(pixels, width, height, stride, r, g, b, clockX, clockY, bold);
+
+            var bitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);
+            bitmap.WritePixels(new Int32Rect(0, 0, width, height), pixels, stride, 0);
+            bitmap.Freeze();
+            return bitmap;
+        }
+
+        private static void DrawClock(byte[] pixels, int width, int height, int stride, byte r, byte g, byte b, int startX, int startY, bool bold)
+        {
+            byte[][] glyphs = bold ? ClockBoldGlyphs : ClockNormalGlyphs;
+            int glyphWidth = bold ? ClockBoldWidth : ClockNormalWidth;
+            int glyphHeight = bold ? ClockBoldHeight : ClockNormalHeight;
+            int[] offsets = { 0, 7, 16, 23 };
+            const int colonX = 14;
+            int colonRow1 = bold ? 3 : 2;
+            int colonRow2 = bold ? 7 : 5;
+            int[] digits = { 1, 2, 0, 0 };
+
+            for (int i = 0; i < digits.Length; i++)
+            {
+                DrawClockDigit(pixels, width, height, stride, glyphs, glyphWidth, glyphHeight, startX + offsets[i], startY, digits[i], r, g, b);
+            }
+
+            // 冒号
+            DrawClockPixel(pixels, width, height, stride, startX + colonX, startY + colonRow1, r, g, b);
+            DrawClockPixel(pixels, width, height, stride, startX + colonX, startY + colonRow2, r, g, b);
+        }
+
+        private static void DrawClockDigit(byte[] pixels, int width, int height, int stride, byte[][] glyphs, int glyphWidth, int glyphHeight, int x, int y, int digit, byte r, byte g, byte b)
+        {
+            if (digit < 0 || digit > 9)
+            {
+                return;
+            }
+
+            byte[] glyph = glyphs[digit];
+            for (int row = 0; row < glyphHeight; row++)
+            {
+                byte bits = glyph[row];
+                for (int col = 0; col < glyphWidth; col++)
+                {
+                    if ((bits & (1 << (glyphWidth - 1 - col))) != 0)
+                    {
+                        DrawClockPixel(pixels, width, height, stride, x + col, y + row, r, g, b);
+                    }
+                }
+            }
+        }
+
+        private static void DrawClockPixel(byte[] pixels, int width, int height, int stride, int x, int y, byte r, byte g, byte b)
+        {
+            if (x < 0 || y < 0 || x >= width || y >= height)
+            {
+                return;
+            }
+
+            int offset = y * stride + x * 4;
+            pixels[offset] = b;
+            pixels[offset + 1] = g;
+            pixels[offset + 2] = r;
+            pixels[offset + 3] = 255;
         }
 
         protected override void OnStateChanged(System.EventArgs e)
@@ -2632,6 +3586,8 @@ namespace XPanel.Application
 
         protected override void OnClosed(System.EventArgs e)
         {
+            _clockGifPreviewTimer.Stop();
+            _clockGifPreviews.Clear();
             if (System.Windows.Application.Current is App app)
             {
                 app.ChannelSessionStateChanged -= App_ChannelSessionStateChanged;
@@ -2737,6 +3693,15 @@ namespace XPanel.Application
                         : BleAddressType.Unknown.ToString(),
                     SyncConfig = syncConfig,
                 };
+
+                if (addDeviceWindow.ConnectedChannel != null && addDeviceWindow.ConnectedSessionId != 0)
+                {
+                    _connectedDevices[channelKey] = _connectedDevices[channelKey] with
+                    {
+                        CommunicationChannel = addDeviceWindow.ConnectedChannel,
+                    };
+                    _ = ReadAndPersistDeviceConfigAsync(channelKey, addDeviceWindow.ConnectedChannel, addDeviceWindow.ConnectedSessionId);
+                }
 
                 WriteAppLog($"Manual add device success: key={channelKey}, name={addDeviceWindow.ConnectedDeviceName}, addr={address}", "Device");
 
@@ -3408,6 +4373,13 @@ namespace XPanel.Application
                         continue;
                     }
 
+                    _connectedDevices[channelKey] = _connectedDevices[channelKey] with
+                    {
+                        Status = DeviceConnectionVisualState.Connected,
+                        SessionId = handshake.SessionId,
+                        CommunicationChannel = channel,
+                    };
+
                     bool registered = app.RegisterConnectedChannel(
                         channelKey,
                         channel,
@@ -3740,14 +4712,31 @@ namespace XPanel.Application
 
             try
             {
+                WriteAppLog($"Device config read starting: key={channelKey}, session={sessionId}", "DeviceConfig");
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 
-                string? ssid = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiSsid, cts.Token);
-                string? password = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiPassword, cts.Token);
-                string? province = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherProvince, cts.Token);
-                string? city = await TryReadSingleConfigAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherCity, cts.Token);
+                byte[]? ssidValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiSsid, cts.Token);
+                byte[]? passwordValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdWifiPassword, cts.Token);
+                byte[]? provinceValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherProvince, cts.Token);
+                byte[]? cityValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdWeatherCity, cts.Token);
+                byte[]? clockFontValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdClockFont, cts.Token);
+                byte[]? clockBackgroundModeValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdClockBackgroundMode, cts.Token);
+                byte[]? clockColorValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdClockColorRgb, cts.Token);
+                byte[]? clockXValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdClockPositionX, cts.Token);
+                byte[]? clockYValue = await TryReadSingleConfigValueAsync(channel, sessionId, XpfProtocolConstants.CfgIdClockPositionY, cts.Token);
 
-                if (ssid == null && password == null && province == null && city == null)
+                string? ssid = DecodeConfigUtf8(ssidValue);
+                string? password = DecodeConfigUtf8(passwordValue);
+                string? province = DecodeConfigUtf8(provinceValue);
+                string? city = DecodeConfigUtf8(cityValue);
+                int? clockFont = DecodeConfigInt32(clockFontValue);
+                int? clockBackgroundMode = DecodeConfigInt32(clockBackgroundModeValue);
+                int? clockColorRgb = DecodeConfigInt32(clockColorValue);
+                int? clockX = DecodeConfigInt32(clockXValue);
+                int? clockY = DecodeConfigInt32(clockYValue);
+
+                if (ssid == null && password == null && province == null && city == null &&
+                    clockFont == null && clockBackgroundMode == null && clockColorRgb == null && clockX == null && clockY == null)
                 {
                     WriteAppLog($"Device config read produced no values, keeping saved values: key={channelKey}", "DeviceConfig");
                     return;
@@ -3764,8 +4753,17 @@ namespace XPanel.Application
                     if (password != null) saved.NetworkPassword = password;
                     if (province != null) saved.WeatherProvince = province;
                     if (city != null) saved.WeatherCity = city;
+                    if (clockFont != null) saved.Clock.FontIndex = clockFont.Value;
+                    if (clockBackgroundMode != null) saved.Clock.BackgroundMode = clockBackgroundMode.Value;
+                    if (clockColorRgb != null) saved.Clock.ColorRgb = clockColorRgb.Value & 0x00FFFFFF;
+                    if (clockX != null) saved.Clock.PositionX = clockX.Value;
+                    if (clockY != null) saved.Clock.PositionY = clockY.Value;
 
                     RefreshConnectedDeviceUi();
+                    if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ApplyClockSettingsToUi(channelKey);
+                    }
                     SaveSavedDevicesToConfig();
                 });
 
@@ -3778,9 +4776,9 @@ namespace XPanel.Application
         }
 
         /// <summary>
-        /// 通过 nvm.read 读取单个配置项，返回 UTF-8 字符串；读取失败/被拒/超时返回 null。
+        /// 通过 nvm.read 读取单个配置项的原始 cfg_value；读取失败/被拒/超时返回 null。
         /// </summary>
-        private static async Task<string?> TryReadSingleConfigAsync(
+        private async Task<byte[]?> TryReadSingleConfigValueAsync(
             ICommunicationChannel channel,
             uint sessionId,
             ushort cfgId,
@@ -3805,10 +4803,22 @@ namespace XPanel.Application
                         try
                         {
                             var frame = XpfCodec.Deserialize(frameBytes);
-                            if (frame.OpCode == XpfProtocolConstants.OpNvmRead &&
-                                XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) &&
-                                ackForMsgId == msgId)
+                            if (!XpfCodec.TryReadUInt32(frame.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) ||
+                                ackForMsgId != msgId)
                             {
+                                continue;
+                            }
+
+                            if (frame.MessageType == XpfMessageType.Ack)
+                            {
+                                WriteAppLog($"NVM read ACK received: cfg=0x{cfgId:X4}, msgId={msgId}; waiting for RESP/ERROR", "DeviceConfig");
+                                continue;
+                            }
+
+                            if (frame.OpCode == XpfProtocolConstants.OpNvmRead &&
+                                (frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error))
+                            {
+                                WriteAppLog($"NVM read {frame.MessageType} received: cfg=0x{cfgId:X4}, msgId={msgId}", "DeviceConfig");
                                 responseTcs.TrySetResult(frameBytes);
                                 return;
                             }
@@ -3844,9 +4854,11 @@ namespace XPanel.Application
                 frame.Tlvs[XpfProtocolConstants.TlvCfgCount] = new byte[] { 1 };
                 frame.Tlvs[XpfProtocolConstants.TlvCfgId] = XpfCodec.EncodeUInt16(cfgId);
 
+                WriteAppLog($"NVM read sending: cfg=0x{cfgId:X4}, msgId={msgId}, session={sessionId}", "DeviceConfig");
                 bool sent = await channel.SendAsync(XpfCodec.Serialize(frame), cancellationToken);
                 if (!sent)
                 {
+                    WriteAppLog($"NVM read send failed: cfg=0x{cfgId:X4}, msgId={msgId}", "DeviceConfig");
                     return null;
                 }
 
@@ -3861,6 +4873,7 @@ namespace XPanel.Application
                 }
                 catch (OperationCanceledException)
                 {
+                    WriteAppLog($"NVM read RESP timeout: cfg=0x{cfgId:X4}, msgId={msgId}", "DeviceConfig");
                     return null;
                 }
 
@@ -3878,7 +4891,7 @@ namespace XPanel.Application
                     return null;
                 }
 
-                if (!XpfCodec.TryReadUtf8(response.Tlvs, XpfProtocolConstants.TlvCfgValue, out string value))
+                if (!response.Tlvs.TryGetValue(XpfProtocolConstants.TlvCfgValue, out byte[]? value))
                 {
                     return null;
                 }
@@ -3893,6 +4906,22 @@ namespace XPanel.Application
             {
                 channel.DataReceived -= OnDataReceived;
             }
+        }
+
+        private static string? DecodeConfigUtf8(byte[]? value)
+        {
+            return value == null ? null : Encoding.UTF8.GetString(value);
+        }
+
+        private static int? DecodeConfigInt32(byte[]? value)
+        {
+            if (value == null || value.Length != 4)
+            {
+                return null;
+            }
+
+            uint raw = ((uint)value[0] << 24) | ((uint)value[1] << 16) | ((uint)value[2] << 8) | value[3];
+            return unchecked((int)raw);
         }
 
         private static bool TryExtractFirstXpfFrame(List<byte> buffer, out byte[] frameBytes)
@@ -4324,6 +5353,7 @@ namespace XPanel.Application
                         NetworkPassword = device.NetworkPassword ?? string.Empty,
                         WeatherProvince = device.WeatherProvince ?? string.Empty,
                         WeatherCity = device.WeatherCity ?? string.Empty,
+                        Clock = device.Clock ?? new ClockSettings(),
                         SyncConfig = device.SyncConfig ?? new List<SyncItem>(),
                     };
                 }
@@ -4362,6 +5392,7 @@ namespace XPanel.Application
                             NetworkPassword = d.NetworkPassword ?? string.Empty,
                             WeatherProvince = d.WeatherProvince ?? string.Empty,
                             WeatherCity = d.WeatherCity ?? string.Empty,
+                            Clock = d.Clock ?? new ClockSettings(),
                             SyncConfig = d.SyncConfig,
                         })
                         .Where(d => !string.IsNullOrWhiteSpace(d.DeviceAddress))
@@ -4411,7 +5442,34 @@ namespace XPanel.Application
             public string NetworkPassword { get; set; } = string.Empty;
             public string WeatherProvince { get; set; } = string.Empty;
             public string WeatherCity { get; set; } = string.Empty;
+            public ClockSettings Clock { get; set; } = new();
             public List<SyncItem> SyncConfig { get; set; } = new();
+        }
+
+        private sealed class ClockSettings
+        {
+            public int FontIndex { get; set; }
+            public int BackgroundMode { get; set; }
+            public int ColorRgb { get; set; } = 0x00FFFFFF;
+            public int PositionX { get; set; }
+            public int PositionY { get; set; }
+        }
+
+        private sealed record ClockPreviewFrame(WriteableBitmap Bitmap, int DelayMilliseconds);
+
+        private sealed class ClockGifPreviewState
+        {
+            public ClockGifPreviewState(LedMatrixDisplay preview, IReadOnlyList<ClockPreviewFrame> frames)
+            {
+                Preview = preview;
+                Frames = frames;
+                NextFrameAtUtc = DateTime.UtcNow.AddMilliseconds(frames[0].DelayMilliseconds);
+            }
+
+            public LedMatrixDisplay Preview { get; }
+            public IReadOnlyList<ClockPreviewFrame> Frames { get; }
+            public int FrameIndex { get; set; }
+            public DateTime NextFrameAtUtc { get; set; }
         }
 
         private sealed record SessionHandshakeResult(uint SessionId, ushort KeepaliveMs);

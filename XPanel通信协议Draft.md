@@ -1,7 +1,7 @@
-# XPanel 统一通信协议 Draft (V0.4, Binary First)
+# XPanel 统一通信协议 Draft (V0.5, Binary First)
 
 > 状态: Draft
-> 日期: 2026-08-08
+> 日期: 2026-08-30
 > 目标: 定义 XPanel 在 BLE / 串口 / MQTT 等通信方式下统一的二进制 payload 格式，支持可扩展、可靠传输、按 app_id 路由。
 
 ---
@@ -33,12 +33,12 @@
 
 说明:
 - BLE/UART/MQTT 仅负责承载，不改 payload 语义。
-- V0.4 默认二进制。
+- V0.5 默认二进制。
 - JSON 仅作为调试模式（开发阶段可选），不作为量产主通道。
 
 ---
 
-## 3. 二进制消息格式（V0.4）
+## 3. 二进制消息格式（V0.5）
 
 ### 3.1 总体结构
 
@@ -82,7 +82,7 @@ T(1B) + L(2B) + V(L bytes)
 - V 按字段约定解释。
 - 可包含多个 TLV，顺序不敏感。
 
-### 3.4 通用 TLV 类型表（V0.4）
+### 3.4 通用 TLV 类型表（V0.5）
 
 | T(hex) | 名称 | V 类型 | 说明 |
 |---|---|---|---|
@@ -137,7 +137,7 @@ T(1B) + L(2B) + V(L bytes)
 
 ---
 
-## 4. op_code 与 app_id 路由（V0.4）
+## 4. op_code 与 app_id 路由（V0.5）
 
 ### 4.1 app_id 映射（与现有代码一致）
 
@@ -196,6 +196,9 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0070 | display.screenshot |
 | 0x0071 | display.shot_chunk |
 | 0x0072 | display.shot_end |
+| 0x0080 | clock.config_set |
+| 0x0081 | clock.bg_chunk |
+| 0x0082 | clock.config_commit |
 | 0x00F0 | system.reboot |
 
 ---
@@ -380,6 +383,10 @@ T(1B) + L(2B) + V(L bytes)
 | 4040 | Screenshot Busy（上一次截图未完成） |
 | 4041 | Unsupported Shot Format |
 | 4042 | Shot Chunk Error（缺片/重复/超时） |
+| 4050 | Invalid Clock Config（时钟设置值越界或组合非法） |
+| 4051 | Clock Background Transfer Busy（已有背景图片传输未完成） |
+| 4052 | Clock Background Chunk Error（传输ID错误、缺片、重复、越界或超时） |
+| 4053 | Clock Background Verify Failed（图片大小或 CRC32 校验失败） |
 | 5001 | Internal Error |
 | 5002 | Storage Error |
 | 5003 | Network Error |
@@ -759,6 +766,7 @@ TLV:
 来源:
 - `NetworkMgr` 当前使用 namespace: `wifi_cfg`
 - `TetrisApp` 当前使用 namespace: `tetris`
+- `ClockSettings` 当前使用 namespace: `clock`
 
 | cfg_id | 语义名 | namespace.key | 类型 | 访问建议 |
 |---:|---|---|---|---|
@@ -769,10 +777,16 @@ TLV:
 | 0x0005 | weather.city | `wifi_cfg.city` | utf8 | read/write |
 | 0x0006 | weather.cache_blob | `wifi_cfg.wx_cache` | bytes | read/write（调试/迁移用途） |
 | 0x0101 | tetris.state_blob | `tetris.state` | bytes | read/write |
+| 0x0201 | clock.font | `clock.font` | int32 | read/write（0=粗体,1=正常，语义同 `clock_font_index`） |
+| 0x0202 | clock.bg_mode | `clock.bgmode` | int32 | read/write（1~10 内置背景,11 图片，语义同 `clock_bg_mode`） |
+| 0x0203 | clock.color_rgb | `clock.color` | int32 | read/write（低 24 位 `0x00RRGGBB`，语义同 `clock_color_rgb`） |
+| 0x0204 | clock.pos_x | `clock.posx` | int32 | read/write（第一个数字左上角 x，语义同 `clock_x`） |
+| 0x0205 | clock.pos_y | `clock.posy` | int32 | read/write（第一个数字左上角 y，语义同 `clock_y`） |
 
 说明:
 - 本表只纳入当前代码中已存在的持久化项，后续新增配置项应继续扩展 `cfg_id` 表。
 - `weather.city` 即控制端需要读取的设备天气城市配置。
+- `clock.*` 项与 §15 `clock.config_set` 的专用 TLV 一一对应：`nvm.read/write` 适合单项读写，§15 适合整组设置与背景图片传输，两条路径最终落到同一份 `clock` 命名空间。
 
 ### 13.4 天气城市读取推荐流程
 
@@ -1020,6 +1034,168 @@ byte_offset = (y * shot_width + x) * shot_bytes_per_pixel
 0E 00 04 12 34 56 78   // session_id
 56 00 04 00 00 00 07   // shot_frame_id
 21 00 02 00 12         // chunk_total = 18
+22 00 04 DE AD BE EF   // chunk_crc32
+```
+
+---
+
+## 15. 时钟显示设置与背景图片传输规范
+
+目标:
+- 控制端一次下发时钟字体、位置、颜色和背景模式等全部显示设置。
+- 背景模式 `1~10` 使用设备内置背景；模式 `11` 使用控制端上传的图片。
+- 图片校验成功后保存到设备文件系统，固定 basename 为 `ClockBackground`。
+
+### 15.1 路由与操作
+
+- `app_id = 2 (Clock)`
+- 操作:
+  - `0x0080 clock.config_set`：下发完整时钟设置；图片模式时同时开始一次图片传输
+  - `0x0081 clock.bg_chunk`：下发背景图片数据分片
+  - `0x0082 clock.config_commit`：结束图片传输、校验文件并一次性应用设置
+
+所有请求均使用 `msg_type=cmd`、`flags.need_ack=1`、`qos_level=1`，并携带有效的 `session_id(0x0E)`。控制端应为每个请求使用不同的 `msg_id`，同一图片传输通过 `clock_transfer_id` 关联。
+
+### 15.2 时钟 TLV 类型表（0x60~0x6F）
+
+| T(hex) | 名称 | V 类型 | 长度 | 说明 |
+|---|---|---|---:|---|
+| 0x60 | clock_font_index | uint8 | 1 | 设备内置时钟字体索引；有效范围由 `system.get_caps` 返回 |
+| 0x61 | clock_x | uint8 | 1 | 时钟左上角 x 坐标，单位为像素 |
+| 0x62 | clock_y | uint8 | 1 | 时钟左上角 y 坐标，单位为像素 |
+| 0x63 | clock_color_rgb | bytes | 3 | 字节顺序固定为 R、G、B，每通道 `0~255` |
+| 0x64 | clock_bg_mode | uint8 | 1 | `1~10`=设备内置背景，`11`=图片背景 |
+| 0x65 | clock_image_format | uint8 | 1 | `1=png,2=jpg,3=jpeg,4=bmp,5=gif,6=webp` |
+| 0x66 | clock_image_size | uint32 | 4 | 完整图片文件字节数，不含 TLV 头 |
+| 0x67 | clock_transfer_id | uint32 | 4 | 控制端生成的非零图片传输 ID |
+| 0x68 | clock_image_data | bytes | 1~65535 | 当前图片分片的原始文件字节 |
+| 0x69 | clock_image_width | uint16 | 2 | 图片宽度（像素） |
+| 0x6A | clock_image_height | uint16 | 2 | 图片高度（像素） |
+
+图片分片复用通用 TLV:
+- `chunk_index(0x20)`：分片序号，从 `0` 开始
+- `chunk_total(0x21)`：分片总数
+- `chunk_crc32(0x22)`：完整原始图片文件的 CRC32
+
+`clock_image_format` 与通知图片格式数值保持一致，但字段独立，禁止使用 `notify_image_*` TLV 传输时钟背景。
+
+### 15.3 clock.config_set 请求
+
+无论背景模式为何值，控制端必须在同一个 `clock.config_set` 请求中携带全部基础设置:
+- `session_id(0x0E)`
+- `clock_font_index(0x60)`
+- `clock_x(0x61)`
+- `clock_y(0x62)`
+- `clock_color_rgb(0x63)`
+- `clock_bg_mode(0x64)`
+- 建议携带 `req_id(0x0A)`，用于设置操作幂等
+
+模式条件:
+
+1. `clock_bg_mode=1~10`
+- 不得携带 `clock_image_*`、`clock_transfer_id`、`chunk_total` 或 `chunk_crc32`。
+- 设备校验全部设置成功后立即一次性应用，并返回 `resp`。
+- 切换到内置背景不要求删除已保存的 `ClockBackground.*`，设备只是不加载该文件。
+
+2. `clock_bg_mode=11`
+- 除全部基础设置外，必须同时携带 `clock_image_format(0x65)`、`clock_image_size(0x66)`、`clock_transfer_id(0x67)`、`clock_image_width(0x69)`、`clock_image_height(0x6A)`、`chunk_total(0x21)` 和 `chunk_crc32(0x22)`。
+- 设备仅暂存本请求中的显示设置，不得在图片传输完成前使其生效。
+- 设备校验图片格式、文件大小、尺寸和可用存储空间后返回 `resp`，表示允许控制端开始发送分片；拒绝时返回 `error`，且不得改变当前时钟设置或背景文件。
+
+坐标校验:
+- `clock_x`、`clock_y` 是无符号单字节坐标，协议可表达范围均为 `0~255`。
+- 设备必须结合选定字体的实际边界检查时钟内容是否完整落在显示区域内；越界返回 `4050`，不得静默截断或夹紧坐标。
+
+### 15.4 clock.bg_chunk 请求
+
+每个分片必须携带:
+- `session_id(0x0E)`
+- `clock_transfer_id(0x67)`
+- `chunk_index(0x20)`
+- `clock_image_data(0x68)`
+
+传输规则:
+- `chunk_index` 必须从 `0` 开始严格连续递增，并小于 `clock.config_set` 声明的 `chunk_total`。
+- 除最后一片外，建议各片数据长度相同；BLE 建议 `128~180B`，UART 建议 `512~1024B`。
+- 所有分片拼接后的长度必须等于 `clock_image_size`，字节内容必须是完整图片文件，不能是解码后的像素数组。
+- 设备应把数据写入临时文件，不得直接覆盖当前 `ClockBackground.*`。
+- 每片成功写入后返回 `resp`，至少包含 `ack_for_msg_id(0x01)`、`clock_transfer_id(0x67)` 和 `chunk_index(0x20)`。
+- 传输 ID 不匹配、分片缺失、重复、越界或超时返回 `4052`，设备删除临时文件并放弃暂存设置。
+
+### 15.5 clock.config_commit 请求
+
+控制端发送完全部分片后发起提交，请求必须携带:
+- `session_id(0x0E)`
+- `clock_transfer_id(0x67)`
+- `chunk_total(0x21)`
+- `chunk_crc32(0x22)`
+
+设备提交顺序:
+1. 确认分片数量与总字节数分别等于先前声明的 `chunk_total` 和 `clock_image_size`。
+2. 对临时文件计算完整 CRC32，并与 `chunk_crc32` 比较。
+3. 按 `clock_image_format` 解码或检查文件签名、尺寸；格式必须属于设备 `system.get_caps` 声明的支持集合。
+4. 校验全部通过后，枚举并删除文件系统中 basename 恰好为 `ClockBackground` 的所有旧文件，不区分后缀，例如 `ClockBackground.png`、`ClockBackground.jpg`。不得删除 `ClockBackgroundBackup.png` 等 basename 不同的文件。
+5. 将临时文件保存为 `ClockBackground.<ext>`，其中 `<ext>` 由格式枚举确定：`png`、`jpg`、`jpeg`、`bmp`、`gif` 或 `webp`；禁止采用控制端提供的路径或文件名。
+6. 文件保存成功后，一次性应用在 `clock.config_set` 中暂存的全部显示设置，并持久化配置；随后返回 `resp`。
+
+任一步骤失败时:
+- 大小或 CRC32 不一致返回 `4053`。
+- 格式不支持返回 `4020`，文件过大返回 `4021`，文件系统操作失败返回 `5002`。
+- 设备必须删除临时文件、放弃暂存设置，并保持提交前的显示设置。
+- 删除旧文件后若最终保存失败，设备应尽可能从备份恢复旧背景；实现时建议使用临时文件和文件系统 rename 完成原子替换。
+
+### 15.6 响应与并发规则
+
+成功响应统一使用 `msg_type=resp`，并至少携带:
+- `ack_for_msg_id(0x01)`
+- `clock_bg_mode(0x64)`
+- 图片模式下附加 `clock_transfer_id(0x67)`
+
+失败响应使用 `msg_type=error`，携带 `ack_for_msg_id(0x01)`、`err_code(0x07)` 和可选 `err_msg(0x08)`。
+
+设备同一时刻只维护一个时钟背景图片传输:
+- 已有传输未提交或取消时，新 `clock.config_set(mode=11)` 返回 `4051`。
+- 传输超时建议为 `30s`；超时后删除临时文件并释放传输状态。
+- 相同 `req_id + endpoint_id` 的重试必须返回原处理结果，不得重复删除或写入文件。
+
+### 15.7 图片模式交互示例
+
+开始传输并下发全部设置（control -> device）:
+
+```text
+// header: app_id=2, op_code=0x0080, msg_type=cmd
+0E 00 04 12 34 56 78   // session_id
+60 00 01 02            // clock_font_index=2
+61 00 01 03            // clock_x=3
+62 00 01 08            // clock_y=8
+63 00 03 FF C0 20      // clock_color_rgb=(255,192,32)
+64 00 01 0B            // clock_bg_mode=11 (image)
+65 00 01 01            // clock_image_format=png
+66 00 04 00 00 0C 00   // clock_image_size=3072
+67 00 04 00 00 00 2A   // clock_transfer_id=42
+69 00 02 00 20         // clock_image_width=32
+6A 00 02 00 20         // clock_image_height=32
+21 00 02 00 06         // chunk_total=6
+22 00 04 DE AD BE EF   // chunk_crc32
+```
+
+发送第 0 片（control -> device）:
+
+```text
+// header: app_id=2, op_code=0x0081, msg_type=cmd
+0E 00 04 12 34 56 78   // session_id
+67 00 04 00 00 00 2A   // clock_transfer_id=42
+20 00 02 00 00         // chunk_index=0
+68 02 00 ...           // clock_image_data (512 bytes)
+```
+
+提交（control -> device）:
+
+```text
+// header: app_id=2, op_code=0x0082, msg_type=cmd
+0E 00 04 12 34 56 78   // session_id
+67 00 04 00 00 00 2A   // clock_transfer_id=42
+21 00 02 00 06         // chunk_total=6
 22 00 04 DE AD BE EF   // chunk_crc32
 ```
 

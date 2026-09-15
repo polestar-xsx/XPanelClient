@@ -26,6 +26,7 @@
     <PackageReference Include="Serilog" Version="3.1.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
     <!-- Windows Forms (System Tray) -->
     <PackageReference Include="System.Windows.Forms" Version="4.0.0" />
     <PackageReference Include="System.Drawing.Common" Version="6.0.0" />
@@ -38,6 +39,19 @@
     </Resource>
     <Resource Include="..\..\resources\camera.png">
       <Link>Resources\camera.png</Link>
+    </Resource>
+    <!-- Clock background mode thumbnails -->
+    <Resource Include="..\..\resources\Matrix.png">
+      <Link>Resources\Matrix.png</Link>
+    </Resource>
+    <Resource Include="..\..\resources\GravityBall.png">
+      <Link>Resources\GravityBall.png</Link>
+    </Resource>
+    <Resource Include="..\..\resources\Music.png">
+      <Link>Resources\Music.png</Link>
+    </Resource>
+    <Resource Include="..\..\resources\dropper.png">
+      <Link>Resources\dropper.png</Link>
     </Resource>
   </ItemGroup>
 

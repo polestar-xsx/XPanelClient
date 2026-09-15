@@ -17,6 +17,7 @@ namespace XPanel.Core.Protocol
 
     public static class XpfProtocolConstants
     {
+        public const ushort AppIdClock = 2;
         public const ushort AppIdProtocolMgr = 106;
         public const ushort AppIdRtcMgr = 107;
         public const ushort AppIdNotificationMgr = 101;
@@ -38,18 +39,36 @@ namespace XPanel.Core.Protocol
         public const ushort OpDisplayScreenshot = 0x0070;
         public const ushort OpDisplayShotChunk = 0x0071;
         public const ushort OpDisplayShotEnd = 0x0072;
+        public const ushort OpClockConfigSet = 0x0080;
+        public const ushort OpClockBgChunk = 0x0081;
+        public const ushort OpClockConfigCommit = 0x0082;
 
         // 天气同步模式（wx_mode，见协议第 12 章）
         public const byte WxModeDataSync = 0x01;
 
         // 统一配置作用域与配置项 ID（见协议第 13 章）
         public const byte CfgScopeDeviceNvm = 0x01;
+
+        // cfg_value_type 枚举（见协议 §13 TLV 0x26）
+        public const byte CfgValueTypeBool = 0x01;
+        public const byte CfgValueTypeInt32 = 0x02;
+        public const byte CfgValueTypeFloat32 = 0x03;
+        public const byte CfgValueTypeUtf8 = 0x04;
+        public const byte CfgValueTypeBytes = 0x05;
+
         public const ushort CfgIdWifiSsid = 0x0002;
         public const ushort CfgIdWifiPassword = 0x0003;
         public const ushort CfgIdWeatherProvince = 0x0004;
         public const ushort CfgIdWeatherCity = 0x0005;
+        public const ushort CfgIdClockFont = 0x0201;
+        public const ushort CfgIdClockBackgroundMode = 0x0202;
+        public const ushort CfgIdClockColorRgb = 0x0203;
+        public const ushort CfgIdClockPositionX = 0x0204;
+        public const ushort CfgIdClockPositionY = 0x0205;
 
         public const byte TlvAckForMsgId = 0x01;
+        public const byte TlvErrCode = 0x07;
+        public const byte TlvReqId = 0x0A;
         public const byte TlvEndpointId = 0x06;
         public const byte TlvClientNonce = 0x0B;
         public const byte TlvServerNonce = 0x0C;
@@ -92,6 +111,19 @@ namespace XPanel.Core.Protocol
         public const byte TlvShotFrameId = 0x56;
         public const byte TlvShotData = 0x57;
         public const byte TlvShotChunkSize = 0x58;
+
+        // 时钟显示与背景图片传输 TLV（见协议第 15 章）
+        public const byte TlvClockFontIndex = 0x60;
+        public const byte TlvClockX = 0x61;
+        public const byte TlvClockY = 0x62;
+        public const byte TlvClockColorRgb = 0x63;
+        public const byte TlvClockBgMode = 0x64;
+        public const byte TlvClockImageFormat = 0x65;
+        public const byte TlvClockImageSize = 0x66;
+        public const byte TlvClockTransferId = 0x67;
+        public const byte TlvClockImageData = 0x68;
+        public const byte TlvClockImageWidth = 0x69;
+        public const byte TlvClockImageHeight = 0x6A;
 
         // 天气同步 TLV（见协议第 12.2 节）
         public const byte TlvWxMode = 0x30;

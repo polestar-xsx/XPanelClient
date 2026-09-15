@@ -28,6 +28,7 @@ namespace XPanel.Application
         public string ConnectedDeviceAddress { get; private set; } = string.Empty;
         public BleAddressType ConnectedBleAddressType { get; private set; } = BleAddressType.Unknown;
         public uint ConnectedSessionId { get; private set; }
+        public ICommunicationChannel? ConnectedChannel { get; private set; }
 
         public AddDeviceWindow()
         {
@@ -309,6 +310,7 @@ namespace XPanel.Application
                 ConnectedBleAddressType = selectedBleDevice.AddressType;
                 ConnectedMethodDisplay = "Bluetooth (BLE)";
                 ConnectedSessionId = handshakeResult.SessionId;
+                ConnectedChannel = bleChannel;
                 DialogResult = true;
                 this.Close();
             }
