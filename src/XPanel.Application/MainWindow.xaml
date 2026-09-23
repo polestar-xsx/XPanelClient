@@ -7,47 +7,41 @@
         Visibility="Hidden"
         Background="#F8F9FA">
     <Window.Resources>
-        <!-- TabItem 样式 -->
+        <!-- TabItem 样式：选中项与下方内容区背景融合，靠高亮/凸起区分，而非加选中框 -->
         <Style x:Key="ModernTabItemStyle" TargetType="{x:Type TabItem}">
+            <Setter Property="Width" Value="150"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type TabItem}">
-                        <Grid Height="30" Background="Transparent" Margin="12,4">
-                            <Border Name="Border" 
-                                    Height="30"
-                                    Background="#FFFFFF"
-                                    BorderBrush="#E0E0E0"
-                                    BorderThickness="0"
-                                    CornerRadius="10"
-                                    Padding="25,0"
-                                    Margin="0"
-                                    HorizontalAlignment="Stretch"
-                                    VerticalAlignment="Stretch">
-                                <ContentPresenter x:Name="ContentSite"
-                                                  VerticalAlignment="Center"
-                                                  HorizontalAlignment="Center"
-                                                  ContentSource="Header"
-                                                  RecognizesAccessKey="True" />
-                            </Border>
-                        </Grid>
+                        <Border Name="Border"
+                                Height="33"
+                                Background="{TemplateBinding Background}"
+                            CornerRadius="10,10,0,0"
+                                Padding="12,0"
+                            Margin="4,6,4,-1"
+                                VerticalAlignment="Bottom">
+                            <ContentPresenter x:Name="ContentSite"
+                                              VerticalAlignment="Center"
+                                              HorizontalAlignment="Center"
+                                              ContentSource="Header"
+                                              RecognizesAccessKey="True" />
+                        </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="Border" Property="Background" Value="#2196F3"/>
-                                <Setter TargetName="Border" Property="BorderThickness" Value="0"/>
-                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="White"/>
+                                <Setter TargetName="Border" Property="Height" Value="46"/>
+                                <Setter TargetName="Border" Property="Margin" Value="4,0,4,-1"/>
+                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="#3F4D56"/>
                                 <Setter TargetName="ContentSite" Property="TextBlock.FontWeight" Value="Bold"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="False">
-                                <Setter TargetName="Border" Property="Background" Value="Transparent"/>
-                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="#666666"/>
+                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="#56616A"/>
                             </Trigger>
                             <MultiTrigger>
                                 <MultiTrigger.Conditions>
                                     <Condition Property="IsSelected" Value="False"/>
                                     <Condition Property="IsMouseOver" Value="True"/>
                                 </MultiTrigger.Conditions>
-                                <Setter TargetName="Border" Property="Background" Value="Transparent"/>
-                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="#2196F3"/>
+                                <Setter TargetName="ContentSite" Property="TextBlock.Foreground" Value="#805A45"/>
                             </MultiTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -55,6 +49,18 @@
             </Setter>
             <Setter Property="Foreground" Value="#333333"/>
             <Setter Property="FontSize" Value="14"/>
+        </Style>
+
+        <Style x:Key="HeaderOnlyTabControlStyle" TargetType="{x:Type TabControl}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TabControl}">
+                        <TabPanel IsItemsHost="True"
+                                  Background="{TemplateBinding Background}"
+                                  KeyboardNavigation.TabNavigation="Local"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <!-- Rounded rectangle ComboBox style -->
@@ -219,75 +225,90 @@
 
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Title Bar -->
-        <Border Grid.Row="0" Background="#2196F3">
-            <StackPanel Margin="20,15">
-                <TextBlock Text="XPanel Device Client" FontSize="20" Foreground="White" FontWeight="Bold"/>
-                <TextBlock Text="System Tray Application | Multi-Channel Support" FontSize="12" Foreground="#E0E0E0" Margin="0,5,0,0"/>
-            </StackPanel>
-        </Border>
-
-        <!-- Content Area with Left Sidebar Tabs -->
-        <Grid Grid.Row="1">
+        <!-- Content Area: Top Tab Strip + Left Device List + Right Content -->
+        <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="200"/>
+                <ColumnDefinition Width="175"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Left Navigation Panel -->
-            <Border Grid.Column="0" Background="#FFFFFF" BorderBrush="#E0E0E0" BorderThickness="0,0,1,0">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <TabControl Name="LeftTabControl" TabStripPlacement="Left" 
-                                Background="Transparent"
-                                BorderThickness="0">
-                        <TabItem Header="Device" Style="{StaticResource ModernTabItemStyle}">
-                            <Grid/>
-                        </TabItem>
-                        <TabItem Header="Synchronization" Style="{StaticResource ModernTabItemStyle}">
-                            <Grid/>
-                        </TabItem>
-                        <TabItem Header="Clock Style" Style="{StaticResource ModernTabItemStyle}">
-                            <Grid/>
-                        </TabItem>
-                        <TabItem Header="System Settings" Style="{StaticResource ModernTabItemStyle}">
-                            <Grid/>
-                        </TabItem>
-                    </TabControl>
-                </ScrollViewer>
+            <!-- Left Device List Panel (full height, independent from the right-side tabs) -->
+            <!-- No divider/border on the right: a selected device row bleeds to this edge to merge with the right panel -->
+            <Border Grid.Column="0" Background="#EFEFEF" BorderThickness="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="46"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Header band shares the tab strip's gray so both columns form one continuous top band -->
+                    <Border Grid.Row="0" Background="#EFEFEF">
+                        <TextBlock Text="Devices" FontSize="14" FontWeight="Bold" Foreground="#333333"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+
+                    <Grid Grid.Row="1" Margin="0,23,0,0" ClipToBounds="False">
+                        <TextBlock Name="NoConnectedDevicesText" Text="No devices connected" Foreground="#999" FontSize="13"
+                                   TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center" Margin="15,0,15,0"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Name="ConnectedDevicesPanel" Visibility="Collapsed" HorizontalAlignment="Stretch"/>
+                        </ScrollViewer>
+                    </Grid>
+
+                    <Button Grid.Row="2" Name="AddDeviceBottomButton" Content="Add Device"
+                            Style="{StaticResource RoundedRectButtonStyle}" Padding="16,10" Background="#4CAF50"
+                            FontSize="12" Margin="15,15,15,6" HorizontalAlignment="Stretch"
+                            Click="AddDevice_Click"/>
+
+                        <Button Grid.Row="3" Name="RemoveSelectedDeviceButton" Content="Remove"
+                            Style="{StaticResource RoundedRectButtonStyle}" Padding="16,10" Background="#F44336"
+                                FontSize="12" Margin="15,0,15,3" HorizontalAlignment="Stretch"
+                            Click="RemoveDevice_Click"/>
+                </Grid>
             </Border>
 
-            <!-- Content Panel -->
-            <Grid Grid.Column="1">
+            <!-- Right Settings Area: top tab strip visually merges with the content below -->
+            <Grid Grid.Column="1" Background="#EFEFEF">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Tab Content Header -->
-                <Border Grid.Row="0" Background="#FAFAFA" Padding="20,15" BorderBrush="#E0E0E0" BorderThickness="0">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        
-                        <TextBlock Grid.Column="0" Name="TabHeader" Text="Device Information" FontSize="18" FontWeight="Bold" Foreground="#333333" VerticalAlignment="Center"/>
-                        
-                        <!-- Device Selector for Synchronization Page -->
-                        <StackPanel Grid.Column="1" Name="DeviceSelectorPanel" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed" Margin="0,0,20,0">
-                            <TextBlock Text="Select Device:" FontSize="14" Foreground="#333333" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <ComboBox Name="DeviceSelector" Style="{StaticResource RoundedRectComboBoxStyle}" Width="200" Height="32" Padding="10,6" FontSize="12" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </Grid>
+                <!-- Top Tab Strip -->
+                <Border Grid.Row="0" Height="46" Background="#EFEFEF" Padding="0,0,0,0">
+                    <TabControl Name="LeftTabControl" TabStripPlacement="Top"
+                                Style="{StaticResource HeaderOnlyTabControlStyle}"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Padding="0"
+                                Margin="12,0,0,0"
+                                VerticalAlignment="Bottom"
+                                HorizontalAlignment="Left">
+                        <TabItem Header="Information" Background="#F8D7DA" Style="{StaticResource ModernTabItemStyle}">
+                            <Grid/>
+                        </TabItem>
+                        <TabItem Header="Synchronization" Background="#D9EAF7" Style="{StaticResource ModernTabItemStyle}">
+                            <Grid/>
+                        </TabItem>
+                        <TabItem Header="Clock Style" Background="#FFF0C2" Style="{StaticResource ModernTabItemStyle}">
+                            <Grid/>
+                        </TabItem>
+                        <TabItem Header="System Settings" Background="#DDEEDB" Style="{StaticResource ModernTabItemStyle}">
+                            <Grid/>
+                        </TabItem>
+                    </TabControl>
                 </Border>
 
                 <!-- Tab Content -->
-                <Grid Grid.Row="1" Margin="20">
+                <Border Grid.Row="1" Background="#FFFFFF" BorderThickness="0"
+                    CornerRadius="12" ClipToBounds="True" Margin="0,0,3,3">
+                <Grid Margin="20">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
@@ -297,26 +318,20 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- Device Info Tab Content -->
+                    <!-- Device Info Tab Content: shows only the currently selected device's basic info -->
                     <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="DeviceInfoPanel" Margin="0">
-                        <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
-
-                            <!-- Title -->
-                            <TextBlock Grid.Row="0" Text="Connected Devices" FontSize="14" FontWeight="Bold" Margin="0,0,0,15" Visibility="Collapsed"/>
-
-                            <!-- Connected Device Cards -->
-                            <Grid Grid.Row="1">
-                                <TextBlock Name="NoConnectedDevicesText" Text="No devices connected" Foreground="#999" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                    <StackPanel Name="ConnectedDevicesPanel" Visibility="Collapsed"/>
-                                </ScrollViewer>
-                            </Grid>
-
-                        </Grid>
+                        <TextBlock Name="NoSelectedDeviceText" Text="Select a device from the list on the left to view its details"
+                                   Foreground="#999" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Visibility="Collapsed"/>
+                        <Border Name="SelectedDeviceInfoCard" BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Padding="20" Visibility="Collapsed">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                    <Ellipse Name="SelectedDeviceStatusDot" Width="12" Height="12" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                                    <TextBlock Name="SelectedDeviceNameText" FontSize="20" FontWeight="SemiBold" Foreground="#333333" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <TextBlock Name="SelectedDeviceMethodText" FontSize="13" Foreground="#666666" Margin="0,0,0,10"/>
+                                <TextBlock Name="SelectedDeviceInfoText" FontSize="13" Foreground="#666666" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
 
                     <!-- Synchronization Panel -->
@@ -376,6 +391,50 @@
 
                     <!-- Clock Style Panel -->
                     <ScrollViewer Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockStylePanel" Margin="0" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer.Resources>
+                            <Style TargetType="{x:Type ScrollBar}">
+                                <Setter Property="Width" Value="14"/>
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="{x:Type ScrollBar}">
+                                            <Grid Background="Transparent">
+                                                <Track x:Name="PART_Track"
+                                                       Orientation="{TemplateBinding Orientation}"
+                                                       IsDirectionReversed="True">
+                                                    <Track.DecreaseRepeatButton>
+                                                        <RepeatButton Command="ScrollBar.LineUpCommand"
+                                                                      Background="Transparent"
+                                                                      BorderThickness="0"
+                                                                      IsTabStop="False"
+                                                                      Focusable="False"/>
+                                                    </Track.DecreaseRepeatButton>
+                                                    <Track.Thumb>
+                                                        <Thumb Margin="2,0"
+                                                               Background="#9E9E9E"
+                                                               BorderThickness="0">
+                                                            <Thumb.Template>
+                                                                <ControlTemplate TargetType="{x:Type Thumb}">
+                                                                    <Border Background="{TemplateBinding Background}"
+                                                                            CornerRadius="6"/>
+                                                                </ControlTemplate>
+                                                            </Thumb.Template>
+                                                        </Thumb>
+                                                    </Track.Thumb>
+                                                    <Track.IncreaseRepeatButton>
+                                                        <RepeatButton Command="ScrollBar.LineDownCommand"
+                                                                      Background="Transparent"
+                                                                      BorderThickness="0"
+                                                                      IsTabStop="False"
+                                                                      Focusable="False"/>
+                                                    </Track.IncreaseRepeatButton>
+                                                </Track>
+                                            </Grid>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </ScrollViewer.Resources>
                         <StackPanel>
                         <TextBlock Text="Font" FontSize="14" FontWeight="Bold" Margin="0,0,0,15"/>
                         <Border BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="8" Margin="0,0,0,20">
@@ -494,12 +553,6 @@
                         </StackPanel>
                     </ScrollViewer>
 
-                    <!-- Add Device Button (Bottom Center of whole Device area) -->
-                    <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="AddDeviceBottomButton" Content="Add Device"
-                              Style="{StaticResource RoundedRectButtonStyle}" Padding="20,12" Background="#4CAF50"
-                              FontSize="12" Margin="0,15,0,0" Width="200" HorizontalAlignment="Center"
-                           Click="AddDevice_Click"/>
-
                     <!-- Apply Button (Clock Style tab) -->
                     <Button Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockApplyButton" Content="Apply"
                               Style="{StaticResource RoundedRectButtonStyle}" Padding="20,12" Background="#4CAF50"
@@ -507,11 +560,12 @@
                               Visibility="Collapsed"
                            Click="ClockApply_Click"/>
                 </Grid>
+                </Border>
             </Grid>
         </Grid>
 
         <!-- Status Bar -->
-        <Border Grid.Row="2" Background="#FAFAFA" BorderBrush="#E0E0E0" BorderThickness="0,1,0,0">
+        <Border Grid.Row="1" Background="#FAFAFA" BorderBrush="#E0E0E0" BorderThickness="0,1,0,0">
             <Grid Margin="20,12">
                 <TextBlock Name="NoDeviceStatusText"
                            Text="No Device"

@@ -2074,35 +2074,59 @@ namespace XPanel.Application
             RefreshSyncItemsUi();
         }
 
-        private void InitializeDeviceSelectorForSync()
+        private void DeviceListRow_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            DeviceSelector.Items.Clear();
-            DeviceSelector.SelectionChanged -= DeviceSelector_SelectionChanged;
-
-            foreach (var device in _connectedDevices.Values.OrderBy(d => d.DeviceName))
+            if (sender is Border row && row.Tag is string channelKey)
             {
-                DeviceSelector.Items.Add(new ComboBoxItem { Content = device.DeviceName, Tag = device.ChannelKey });
+                SelectDevice(channelKey);
             }
-
-            DeviceSelector.SelectionChanged += DeviceSelector_SelectionChanged;
         }
 
-        private void DeviceSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void SelectDevice(string channelKey)
         {
-            if (DeviceSelector.SelectedItem is ComboBoxItem selectedItem && selectedItem.Tag is string channelKey)
+            if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
             {
-                // 保存前一个设备的配置
-                if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var prevDevice))
-                {
-                    prevDevice.SyncConfig = new List<SyncItem>(_selectedDeviceSyncItems);
-                }
-
-                // 切换到新设备
-                _selectedDeviceKey = channelKey;
-                RefreshSyncItemsUi();
-                ApplyClockSettingsToUi(channelKey);
-                SaveSavedDevicesToConfig();
+                return;
             }
+
+            // 保存前一个设备的同步配置
+            if (!string.IsNullOrEmpty(_selectedDeviceKey) && _savedDevices.TryGetValue(_selectedDeviceKey, out var prevDevice))
+            {
+                prevDevice.SyncConfig = new List<SyncItem>(_selectedDeviceSyncItems);
+            }
+
+            _selectedDeviceKey = channelKey;
+
+            RefreshConnectedDeviceUi();
+            RefreshSyncItemsUi();
+            ApplyClockSettingsToUi(channelKey);
+            SaveSavedDevicesToConfig();
+        }
+
+        private void RefreshSelectedDeviceInfoPanel()
+        {
+            if (string.IsNullOrEmpty(_selectedDeviceKey) || !_connectedDevices.TryGetValue(_selectedDeviceKey, out var device))
+            {
+                NoSelectedDeviceText.Visibility = Visibility.Visible;
+                SelectedDeviceInfoCard.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            NoSelectedDeviceText.Visibility = Visibility.Collapsed;
+            SelectedDeviceInfoCard.Visibility = Visibility.Visible;
+
+            SelectedDeviceStatusDot.Fill = GetStatusBrush(device.Status);
+            SelectedDeviceNameText.Text = device.DeviceName;
+            SelectedDeviceMethodText.Text = $"Connection: {device.MethodDisplay}    Status: {device.Status}";
+            SelectedDeviceInfoText.Text = BuildDeviceInfoLine(device.ChannelKey);
+        }
+
+        private void UpdateSelectedDeviceIndicator()
+        {
+            bool hasSelection = !string.IsNullOrEmpty(_selectedDeviceKey) && _connectedDevices.TryGetValue(_selectedDeviceKey, out _);
+
+            RemoveSelectedDeviceButton.Tag = _selectedDeviceKey;
+            RemoveSelectedDeviceButton.IsEnabled = hasSelection;
         }
 
         private void RefreshSyncItemsUi()
@@ -2227,10 +2251,6 @@ namespace XPanel.Application
         {
             if (LeftTabControl.SelectedIndex >= 0)
             {
-                // 更新标签页头部文字
-                string[] tabHeaders = { "Device", "Synchronization", "Clock Style", "System Settings" };
-                TabHeader.Text = tabHeaders[LeftTabControl.SelectedIndex];
-
                 // 显示/隐藏对应的内容面板
                 DeviceInfoPanel.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
@@ -2240,26 +2260,22 @@ namespace XPanel.Application
                 {
                     _clockGifPreviewTimer.Stop();
                 }
-                AddDeviceBottomButton.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
                 ClockApplyButton.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
-                DeviceSelectorPanel.Visibility = (LeftTabControl.SelectedIndex == 1 || LeftTabControl.SelectedIndex == 2) ? Visibility.Visible : Visibility.Collapsed;
 
-                // 当切换到Synchronization页面时，刷新UI
-                if (LeftTabControl.SelectedIndex == 1)
+                UpdateSelectedDeviceIndicator();
+
+                // 切换到 Device 页面时刷新所选设备的基本信息
+                if (LeftTabControl.SelectedIndex == 0)
                 {
-                    InitializeDeviceSelectorForSync();
-                    if (DeviceSelector.Items.Count > 0)
-                    {
-                        DeviceSelector.SelectedIndex = 0;
-                    }
+                    RefreshSelectedDeviceInfoPanel();
+                }
+                else if (LeftTabControl.SelectedIndex == 1)
+                {
+                    RefreshSyncItemsUi();
                 }
                 else if (LeftTabControl.SelectedIndex == 2)
                 {
-                    InitializeDeviceSelectorForSync();
-                    if (DeviceSelector.Items.Count > 0)
-                    {
-                        DeviceSelector.SelectedIndex = 0;
-                    }
+                    ApplyClockSettingsToUi(_selectedDeviceKey);
                     LoadClockPictureModes();
                 }
             }
@@ -2359,9 +2375,12 @@ namespace XPanel.Application
             var receiveBuffer = new List<byte>(4096);
             var chunks = new SortedDictionary<ushort, byte[]>();
             ScreenshotMetadata? metadata = null;
+            ScreenshotPreviewWindow? previewWindow = new(device.DeviceName);
+            previewWindow.Show();
 
             void Fail(Exception exception)
             {
+                previewWindow.ShowFailure(exception.Message);
                 metadataTcs.TrySetException(exception);
                 imageDataTcs.TrySetException(exception);
             }
@@ -2397,6 +2416,7 @@ namespace XPanel.Application
                                 }
 
                                 metadata = ParseScreenshotMetadata(frame);
+                                previewWindow.SetProgress(5, "Receiving screenshot...");
                                 metadataTcs.TrySetResult(metadata);
                                 continue;
                             }
@@ -2414,6 +2434,9 @@ namespace XPanel.Application
                                 frame.Tlvs.TryGetValue(XpfProtocolConstants.TlvShotData, out byte[]? chunkData))
                             {
                                 chunks[chunkIndex] = chunkData;
+                                previewWindow.SetProgress(
+                                    5 + (int)(chunks.Count * 90L / metadata.ChunkTotal),
+                                    $"Receiving screenshot... {chunks.Count}/{metadata.ChunkTotal}");
                             }
                             else if (frame.OpCode == XpfProtocolConstants.OpDisplayShotEnd &&
                                      frame.MessageType == XpfMessageType.Event)
@@ -2458,7 +2481,12 @@ namespace XPanel.Application
                 ScreenshotMetadata receivedMetadata = await metadataTcs.Task;
                 byte[] imageData = await imageDataTcs.Task;
                 BitmapSource bitmap = CreateScreenshotBitmap(receivedMetadata, imageData);
-                ShowScreenshotWindow(bitmap, device.DeviceName);
+                ShowScreenshotWindow(bitmap, device.DeviceName, previewWindow);
+            }
+            catch (Exception ex)
+            {
+                previewWindow.ShowFailure(ex.Message);
+                throw;
             }
             finally
             {
@@ -2575,7 +2603,7 @@ namespace XPanel.Application
             return filePath;
         }
 
-        private void ShowScreenshotWindow(BitmapSource bitmap, string deviceName)
+        private void ShowScreenshotWindow(BitmapSource bitmap, string deviceName, ScreenshotPreviewWindow previewWindow)
         {
             var image = new LedMatrixDisplay { SourceBitmap = bitmap };
             if (image.RenderedBitmap == null)
@@ -2588,17 +2616,7 @@ namespace XPanel.Application
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
             string rawFilePath = SaveScreenshotBitmap(bitmap, directory, $"{safeDeviceName}-{timestamp}-raw.bmp");
             string previewFilePath = SaveScreenshotBitmap(image.RenderedBitmap, directory, $"{safeDeviceName}-{timestamp}-preview.bmp");
-            var window = new Window
-            {
-                Title = $"Screenshot - {deviceName}",
-                Owner = this,
-                Content = new ScrollViewer { Content = image, Margin = new Thickness(16) },
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SizeToContent = SizeToContent.WidthAndHeight,
-                MaxWidth = SystemParameters.WorkArea.Width * 0.9,
-                MaxHeight = SystemParameters.WorkArea.Height * 0.9,
-            };
-            window.Show();
+            previewWindow.ShowImage(image, $"Screenshot - {deviceName}");
             WriteAppLog($"Screenshot saved: raw={rawFilePath}, preview={previewFilePath}", "Screenshot");
         }
 
@@ -2938,49 +2956,84 @@ namespace XPanel.Application
 
             ClockSettings settings = GatherClockSettingsFromUi(device.Clock);
 
+            if (settings.BackgroundMode == 11 &&
+                (string.IsNullOrEmpty(_selectedClockPictureMode) || !File.Exists(_selectedClockPictureMode)))
+            {
+                System.Windows.MessageBox.Show("请先选择要发送的背景图片。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             applyButton.IsEnabled = false;
+            var progressWindow = new ClockApplyProgressWindow();
+            using var applyCts = new CancellationTokenSource(settings.BackgroundMode == 11
+                ? TimeSpan.FromSeconds(60)
+                : TimeSpan.FromSeconds(20));
+            int firstFeedbackReceived = 0;
+            using var firstFeedbackCts = CancellationTokenSource.CreateLinkedTokenSource(applyCts.Token);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), firstFeedbackCts.Token);
+                    if (Interlocked.CompareExchange(ref firstFeedbackReceived, 0, 0) == 0)
+                    {
+                        progressWindow.ShowFailure("No device feedback received.");
+                        applyCts.Cancel();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            });
+
+            void ReportClockFeedback(int value, string status)
+            {
+                if (Interlocked.Exchange(ref firstFeedbackReceived, 1) == 0)
+                {
+                    firstFeedbackCts.Cancel();
+                }
+
+                progressWindow.ShowProgress(value, status);
+            }
+
             try
             {
                 bool ok;
                 if (settings.BackgroundMode == 11)
                 {
-                    if (string.IsNullOrEmpty(_selectedClockPictureMode) || !File.Exists(_selectedClockPictureMode))
-                    {
-                        System.Windows.MessageBox.Show("请先选择要发送的背景图片。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
-                        return;
-                    }
-
-                    using var imageCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
                     ok = await SendClockImageAsync(
                         connected.CommunicationChannel,
                         connected.SessionId.Value,
                         settings,
                         _selectedClockPictureMode,
-                        imageCts.Token);
+                        applyCts.Token,
+                        ReportClockFeedback);
                 }
                 else
                 {
                     ok = await WriteClockSettingsToDeviceAsync(
                         connected.CommunicationChannel,
                         connected.SessionId.Value,
-                        settings);
+                        settings,
+                        applyCts.Token,
+                        ReportClockFeedback);
                 }
 
                 if (ok)
                 {
                     device.Clock = settings;
                     SaveSavedDevicesToConfig();
-                    System.Windows.MessageBox.Show("时钟样式已下发到设备。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Information);
+                    progressWindow.ShowSuccess("Clock style applied successfully.");
                 }
                 else
                 {
-                    System.Windows.MessageBox.Show("时钟样式下发失败，请重试。", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    progressWindow.ShowFailure("Clock style apply failed.");
                 }
             }
             catch (Exception ex)
             {
                 WriteAppLog($"Clock apply failed: key={channelKey}, reason={ex.Message}", "ClockConfig");
-                System.Windows.MessageBox.Show($"时钟样式下发出现异常：{ex.Message}", "Clock Style", MessageBoxButton.OK, MessageBoxImage.Error);
+                progressWindow.ShowFailure("Clock style apply failed.");
             }
             finally
             {
@@ -3030,10 +3083,13 @@ namespace XPanel.Application
         }
 
         // 按协议 §13 通过 nvm.write 逐项下发时钟配置项。
-        private async Task<bool> WriteClockSettingsToDeviceAsync(ICommunicationChannel channel, uint sessionId, ClockSettings settings)
+        private async Task<bool> WriteClockSettingsToDeviceAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            ClockSettings settings,
+            CancellationToken cancellationToken,
+            Action<int, string> reportFeedback)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-
             var items = new (ushort CfgId, int Value)[]
             {
                 (XpfProtocolConstants.CfgIdClockFont, settings.FontIndex),
@@ -3046,7 +3102,7 @@ namespace XPanel.Application
             bool allOk = true;
             foreach (var item in items)
             {
-                bool ok = await TryWriteSingleConfigValueAsync(channel, sessionId, item.CfgId, item.Value, cts.Token);
+                bool ok = await TryWriteSingleConfigValueAsync(channel, sessionId, item.CfgId, item.Value, cancellationToken, reportFeedback);
                 if (!ok)
                 {
                     allOk = false;
@@ -3062,7 +3118,8 @@ namespace XPanel.Application
             uint sessionId,
             ushort cfgId,
             int value,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Action<int, string> reportFeedback)
         {
             uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
             var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3091,6 +3148,7 @@ namespace XPanel.Application
 
                             if (frame.MessageType == XpfMessageType.Ack)
                             {
+                                reportFeedback(5, $"Writing clock setting {cfgId:X4}...");
                                 WriteAppLog($"NVM write ACK received: cfg=0x{cfgId:X4}, msgId={msgId}; waiting for RESP/ERROR", "ClockConfig");
                                 continue;
                             }
@@ -3099,6 +3157,7 @@ namespace XPanel.Application
                                 (frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error))
                             {
                                 WriteAppLog($"NVM write {frame.MessageType} received: cfg=0x{cfgId:X4}, msgId={msgId}", "ClockConfig");
+                                reportFeedback(100, $"Clock setting {cfgId:X4} confirmed.");
                                 responseTcs.TrySetResult(frame);
                                 return;
                             }
@@ -3191,7 +3250,8 @@ namespace XPanel.Application
             uint sessionId,
             ClockSettings settings,
             string imagePath,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Action<int, string> reportFeedback)
         {
             byte formatCode = GetClockImageFormatCode(imagePath);
             if (formatCode == 0)
@@ -3249,10 +3309,12 @@ namespace XPanel.Application
             configSet.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
             configSet.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
 
-            if (!await SendClockRequestAwaitRespAsync(channel, configSet, "clock.config_set", cancellationToken))
+            if (!await SendClockRequestAwaitRespAsync(channel, configSet, "clock.config_set", cancellationToken, reportFeedback))
             {
                 return false;
             }
+
+            reportFeedback(5, "Preparing image transfer...");
 
             for (int index = 0; index < chunkTotal; index++)
             {
@@ -3276,10 +3338,12 @@ namespace XPanel.Application
                 chunkFrame.Tlvs[XpfProtocolConstants.TlvChunkIndex] = XpfCodec.EncodeUInt16((ushort)index);
                 chunkFrame.Tlvs[XpfProtocolConstants.TlvClockImageData] = chunk;
 
-                if (!await SendClockRequestAwaitRespAsync(channel, chunkFrame, $"clock.bg_chunk[{index + 1}/{chunkTotal}]", cancellationToken))
+                if (!await SendClockRequestAwaitRespAsync(channel, chunkFrame, $"clock.bg_chunk[{index + 1}/{chunkTotal}]", cancellationToken, reportFeedback))
                 {
                     return false;
                 }
+
+                reportFeedback(5 + (int)((index + 1) * 90L / chunkTotal), $"Transferring image... {index + 1}/{chunkTotal}");
             }
 
             var commit = new XpfFrame
@@ -3297,7 +3361,11 @@ namespace XPanel.Application
             commit.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
             commit.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
 
-            bool committed = await SendClockRequestAwaitRespAsync(channel, commit, "clock.config_commit", cancellationToken);
+            bool committed = await SendClockRequestAwaitRespAsync(channel, commit, "clock.config_commit", cancellationToken, reportFeedback);
+            if (committed)
+            {
+                reportFeedback(100, "Image transfer completed.");
+            }
             WriteAppLog($"Clock image transfer {(committed ? "committed" : "failed")}: transferId={transferId}", "ClockImage");
             return committed;
         }
@@ -3307,7 +3375,8 @@ namespace XPanel.Application
             ICommunicationChannel channel,
             XpfFrame request,
             string logContext,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Action<int, string>? reportFeedback = null)
         {
             uint msgId = request.MsgId;
             var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3336,12 +3405,14 @@ namespace XPanel.Application
 
                             if (frame.MessageType == XpfMessageType.Ack)
                             {
+                                reportFeedback?.Invoke(1, $"Device feedback received: {logContext}...");
                                 WriteAppLog($"{logContext} ACK received: msgId={msgId}; waiting for RESP/ERROR", "ClockImage");
                                 continue;
                             }
 
                             if (frame.MessageType == XpfMessageType.Resp || frame.MessageType == XpfMessageType.Error)
                             {
+                                reportFeedback?.Invoke(frame.MessageType == XpfMessageType.Error ? 0 : 2, $"Device feedback received: {logContext}...");
                                 WriteAppLog($"{logContext} {frame.MessageType} received: msgId={msgId}", "ClockImage");
                                 responseTcs.TrySetResult(frame);
                                 return;
@@ -3708,6 +3779,7 @@ namespace XPanel.Application
                 EnsureTimeSyncScheduleForDevice(channelKey);
                 EnsureWeatherSyncScheduleForDevice(channelKey);
 
+                _selectedDeviceKey = channelKey;
                 RefreshConnectedDeviceUi();
                 SaveSavedDevicesToConfig();
             }
@@ -3715,7 +3787,9 @@ namespace XPanel.Application
 
         private async void RemoveDevice_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is not System.Windows.Controls.Button removeButton || removeButton.Tag is not string channelKey)
+            if (sender is not System.Windows.Controls.Button removeButton ||
+                removeButton.Tag is not string channelKey ||
+                string.IsNullOrEmpty(channelKey))
             {
                 return;
             }
@@ -4019,6 +4093,10 @@ namespace XPanel.Application
                 NoDeviceStatusText.Visibility = Visibility.Visible;
                 DeviceStatusGroupPanel.Visibility = Visibility.Collapsed;
                 DeviceStatusGroupPanel.Children.Clear();
+
+                _selectedDeviceKey = string.Empty;
+                RefreshSelectedDeviceInfoPanel();
+                UpdateSelectedDeviceIndicator();
                 return;
             }
 
@@ -4030,31 +4108,58 @@ namespace XPanel.Application
                 .ThenBy(d => d.ChannelKey, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+            // 确保始终有一个设备被选中，供右侧各标签页联动展示。
+            if (string.IsNullOrEmpty(_selectedDeviceKey) || !_connectedDevices.ContainsKey(_selectedDeviceKey))
+            {
+                _selectedDeviceKey = orderedDevices[0].ChannelKey;
+            }
+
             foreach (var device in orderedDevices)
             {
+                bool isSelected = string.Equals(device.ChannelKey, _selectedDeviceKey, StringComparison.OrdinalIgnoreCase);
+
+                // Flat list item. Selected rows move left and merge into the settings panel.
                 var rowBorder = new Border
                 {
-                    Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 255, 255)),
-                    BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(224, 224, 224)),
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(8),
-                    Margin = new Thickness(0, 0, 0, 10),
-                    Padding = new Thickness(12, 10, 12, 10),
+                    Background = isSelected
+                        ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 255, 255))
+                        : System.Windows.Media.Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    CornerRadius = isSelected ? new CornerRadius(8, 0, 0, 8) : new CornerRadius(8),
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    Margin = new Thickness(5, 2, 0, 2),
+                    Padding = new Thickness(14, 11, 14, 11),
+                    Cursor = System.Windows.Input.Cursors.Hand,
+                    Tag = device.ChannelKey,
                 };
+                rowBorder.MouseLeftButtonUp += DeviceListRow_MouseLeftButtonUp;
 
                 var rowGrid = new Grid();
-                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-                var leftGroup = new StackPanel
+                // Left accent bar only for the selected row (reserve the same width when unselected to avoid text shift).
+                var accentBar = new Border
+                {
+                    Width = 3,
+                    CornerRadius = new CornerRadius(2),
+                    Background = isSelected
+                        ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243))
+                        : System.Windows.Media.Brushes.Transparent,
+                    Margin = new Thickness(0, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                };
+                Grid.SetColumn(accentBar, 0);
+                rowGrid.Children.Add(accentBar);
+
+                var rowStack = new StackPanel
                 {
                     Orientation = Orientation.Horizontal,
                     VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 10, 0),
+                    HorizontalAlignment = HorizontalAlignment.Left,
                 };
-                Grid.SetColumn(leftGroup, 0);
 
-                leftGroup.Children.Add(new System.Windows.Shapes.Ellipse
+                rowStack.Children.Add(new System.Windows.Shapes.Ellipse
                 {
                     Width = 10,
                     Height = 10,
@@ -4063,53 +4168,27 @@ namespace XPanel.Application
                     VerticalAlignment = VerticalAlignment.Center,
                 });
 
-                var textStack = new StackPanel
+                rowStack.Children.Add(new TextBlock
                 {
-                    Orientation = Orientation.Vertical,
+                    Text = device.DeviceName,
+                    FontSize = 14,
+                    FontWeight = isSelected ? FontWeights.SemiBold : FontWeights.Normal,
+                    Foreground = new SolidColorBrush(isSelected
+                        ? System.Windows.Media.Color.FromRgb(33, 150, 243)
+                        : System.Windows.Media.Color.FromRgb(85, 85, 85)),
                     VerticalAlignment = VerticalAlignment.Center,
-                };
-
-                var deviceText = new TextBlock
-                {
-                    Text = $"{device.DeviceName} ({device.MethodDisplay})",
-                    FontSize = 20,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(51, 51, 51)),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    TextWrapping = TextWrapping.Wrap,
-                };
-                textStack.Children.Add(deviceText);
-
-                textStack.Children.Add(new TextBlock
-                {
-                    Text = BuildDeviceInfoLine(device.ChannelKey),
-                    FontSize = 12,
-                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(102, 102, 102)),
-                    Margin = new Thickness(0, 4, 0, 0),
+                    TextTrimming = TextTrimming.CharacterEllipsis,
                     TextWrapping = TextWrapping.Wrap,
                 });
 
-                leftGroup.Children.Add(textStack);
-
-                var removeButton = new System.Windows.Controls.Button
-                {
-                    Content = "Remove",
-                    Style = (Style)FindResource("RoundedRectButtonStyle"),
-                    Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54)),
-                    Foreground = System.Windows.Media.Brushes.White,
-                    Padding = new Thickness(16, 8, 16, 8),
-                    FontSize = 12,
-                    Tag = device.ChannelKey,
-                    VerticalAlignment = VerticalAlignment.Center,
-                };
-                removeButton.Click += RemoveDevice_Click;
-                Grid.SetColumn(removeButton, 1);
-
-                rowGrid.Children.Add(leftGroup);
-                rowGrid.Children.Add(removeButton);
+                Grid.SetColumn(rowStack, 1);
+                rowGrid.Children.Add(rowStack);
                 rowBorder.Child = rowGrid;
                 ConnectedDevicesPanel.Children.Add(rowBorder);
             }
+
+            RefreshSelectedDeviceInfoPanel();
+            UpdateSelectedDeviceIndicator();
 
             NoDeviceStatusText.Visibility = Visibility.Collapsed;
             DeviceStatusGroupPanel.Visibility = Visibility.Visible;
@@ -5419,6 +5498,204 @@ namespace XPanel.Application
             uint? SessionId,
             DeviceConnectionVisualState Status,
             ICommunicationChannel CommunicationChannel = null);
+
+        private sealed class ScreenshotPreviewWindow : Window
+        {
+            private readonly TextBlock _statusText;
+            private readonly ProgressBar _progressBar;
+            private readonly StackPanel _statePanel;
+
+            public ScreenshotPreviewWindow(string deviceName)
+            {
+                Title = $"Screenshot - {deviceName}";
+                Width = 360;
+                Height = 180;
+                Owner = System.Windows.Application.Current?.Windows.OfType<MainWindow>().FirstOrDefault();
+                WindowStartupLocation = WindowStartupLocation.CenterOwner;
+                ResizeMode = ResizeMode.NoResize;
+
+                _statusText = new TextBlock
+                {
+                    Text = "Waiting for device feedback...",
+                    FontSize = 14,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(70, 70, 70)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 12, 0, 0),
+                };
+                _progressBar = new ProgressBar
+                {
+                    Minimum = 0,
+                    Maximum = 100,
+                    Value = 0,
+                    Height = 10,
+                    Margin = new Thickness(20, 22, 20, 0),
+                };
+                _statePanel = new StackPanel
+                {
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                _statePanel.Children.Add(new TextBlock
+                {
+                    Text = "...",
+                    FontSize = 28,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                });
+                _statePanel.Children.Add(_statusText);
+
+                Content = new StackPanel
+                {
+                    Children =
+                    {
+                        _statePanel,
+                        _progressBar,
+                    },
+                };
+            }
+
+            public void SetProgress(int value, string status)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        return;
+                    }
+
+                    _progressBar.Value = Math.Clamp(value, 0, 100);
+                    _statusText.Text = status;
+                });
+            }
+
+            public void ShowFailure(string reason)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        Show();
+                    }
+
+                    _progressBar.Visibility = Visibility.Collapsed;
+                    _statusText.Text = string.IsNullOrWhiteSpace(reason) ? "Screenshot failed" : "Screenshot failed";
+                    if (_statePanel.Children.Count > 0 && _statePanel.Children[0] is TextBlock icon)
+                    {
+                        icon.Text = "X";
+                        icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54));
+                    }
+                });
+            }
+
+            public void ShowImage(LedMatrixDisplay image, string title)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    Title = title;
+                    Content = image;
+                    SizeToContent = SizeToContent.WidthAndHeight;
+                    MaxWidth = SystemParameters.WorkArea.Width * 0.9;
+                    MaxHeight = SystemParameters.WorkArea.Height * 0.9;
+                });
+            }
+        }
+
+        private sealed class ClockApplyProgressWindow : Window
+        {
+            private readonly TextBlock _icon;
+            private readonly TextBlock _statusText;
+            private readonly ProgressBar _progressBar;
+
+            public ClockApplyProgressWindow()
+            {
+                Title = "Clock Style";
+                Width = 360;
+                Height = 180;
+                Owner = System.Windows.Application.Current?.Windows.OfType<MainWindow>().FirstOrDefault();
+                WindowStartupLocation = WindowStartupLocation.CenterOwner;
+                ResizeMode = ResizeMode.NoResize;
+
+                _icon = new TextBlock
+                {
+                    Text = "...",
+                    FontSize = 28,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                };
+                _statusText = new TextBlock
+                {
+                    Text = "Waiting for device feedback...",
+                    FontSize = 14,
+                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(70, 70, 70)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 10, 0, 0),
+                };
+                _progressBar = new ProgressBar
+                {
+                    Minimum = 0,
+                    Maximum = 100,
+                    Height = 10,
+                    Margin = new Thickness(20, 20, 20, 0),
+                };
+
+                Content = new StackPanel
+                {
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Children = { _icon, _statusText, _progressBar },
+                };
+            }
+
+            public void ShowProgress(int value, string status)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        Show();
+                    }
+
+                    _icon.Text = "...";
+                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243));
+                    _progressBar.Visibility = Visibility.Visible;
+                    _progressBar.Value = Math.Clamp(value, 0, 100);
+                    _statusText.Text = status;
+                });
+            }
+
+            public void ShowFailure(string status)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        Show();
+                    }
+
+                    _icon.Text = "X";
+                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54));
+                    _progressBar.Visibility = Visibility.Collapsed;
+                    _statusText.Text = status;
+                });
+            }
+
+            public void ShowSuccess(string status)
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        Show();
+                    }
+
+                    _icon.Text = "OK";
+                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(76, 175, 80));
+                    _progressBar.Visibility = Visibility.Collapsed;
+                    _statusText.Text = status;
+                });
+            }
+        }
 
         private enum DeviceConnectionVisualState
         {
