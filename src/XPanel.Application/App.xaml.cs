@@ -373,7 +373,19 @@ namespace XPanel.Application
                         continue;
                     }
 
-                    context.IncrementMisses();
+                    // A concurrent request may have received a valid response while this
+                    // keepalive probe was pending. The link is active in that case.
+                    if (!context.ShouldSendKeepalive())
+                    {
+                        context.ResetMisses();
+                        continue;
+                    }
+
+                    if (context.IncrementMisses() < 2)
+                    {
+                        continue;
+                    }
+
                     StopSessionKeepaliveMonitor(context.Key);
                     RaiseChannelSessionStateChanged(
                         context.Key,
@@ -1100,6 +1112,7 @@ namespace XPanel.Application
             public void TouchInbound()
             {
                 _lastInboundUtc = DateTime.UtcNow;
+                _consecutiveMisses = 0;
             }
 
             public bool ShouldSendKeepalive()

@@ -18,6 +18,7 @@ namespace XPanel.Core.Protocol
     public static class XpfProtocolConstants
     {
         public const ushort AppIdClock = 2;
+        public const ushort AppIdPaint = 10;
         public const ushort AppIdProtocolMgr = 106;
         public const ushort AppIdRtcMgr = 107;
         public const ushort AppIdNotificationMgr = 101;
@@ -42,6 +43,14 @@ namespace XPanel.Core.Protocol
         public const ushort OpClockConfigSet = 0x0080;
         public const ushort OpClockBgChunk = 0x0081;
         public const ushort OpClockConfigCommit = 0x0082;
+        public const ushort OpPaintBegin = 0x0090;
+        public const ushort OpPaintStroke = 0x0091;
+        public const ushort OpPaintFill = 0x0092;
+        public const ushort OpPaintFrameBegin = 0x0093;
+        public const ushort OpPaintFrameChunk = 0x0094;
+        public const ushort OpPaintFrameEnd = 0x0095;
+        public const ushort OpPaintSync = 0x0096;
+        public const ushort OpPaintEnd = 0x0097;
 
         // 天气同步模式（wx_mode，见协议第 12 章）
         public const byte WxModeDataSync = 0x01;
@@ -124,6 +133,23 @@ namespace XPanel.Core.Protocol
         public const byte TlvClockImageData = 0x68;
         public const byte TlvClockImageWidth = 0x69;
         public const byte TlvClockImageHeight = 0x6A;
+
+        // 画板实时同步 TLV（见协议第 16 章）
+        public const byte TlvPaintSeq = 0x70;
+        public const byte TlvPaintColor = 0x71;
+        public const byte TlvPaintBrushShape = 0x72;
+        public const byte TlvPaintBrushSize = 0x73;
+        public const byte TlvPaintStrokeFlags = 0x74;
+        public const byte TlvPaintPoints = 0x75;
+        public const byte TlvPaintRect = 0x76;
+        public const byte TlvPaintFrameId = 0x77;
+        public const byte TlvPaintPixels = 0x78;
+        public const byte TlvPaintTotalSize = 0x79;
+        public const byte TlvPaintCanvasCrc32 = 0x7A;
+        public const byte TlvPaintSyncFlags = 0x7B;
+        public const byte TlvPaintWidth = 0x7C;
+        public const byte TlvPaintHeight = 0x7D;
+        public const byte TlvPaintEndReason = 0x7F;
 
         // 天气同步 TLV（见协议第 12.2 节）
         public const byte TlvWxMode = 0x30;

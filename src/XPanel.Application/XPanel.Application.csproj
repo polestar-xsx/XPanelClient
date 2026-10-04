@@ -34,6 +34,9 @@
 
   <ItemGroup>
     <!-- Placeholder thumbnail for clock background modes (replace with real images later) -->
+    <Resource Include="..\..\resources\Icon.png">
+      <Link>Resources\Icon.png</Link>
+    </Resource>
     <Resource Include="..\..\resources\Teams.png">
       <Link>Resources\ClockModePlaceholder.png</Link>
     </Resource>

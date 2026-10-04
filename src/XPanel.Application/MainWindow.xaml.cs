@@ -1894,6 +1894,7 @@ namespace XPanel.Application
         private readonly ISyncItemProvider _syncItemService = new SyncItemService();
         private List<SyncItem> _currentSyncItems = new();
         private string _selectedDeviceKey = string.Empty;
+        private int _lastTabIndex = -1;
         private List<SyncItem> _selectedDeviceSyncItems = new();
         private readonly Dictionary<string, CancellationTokenSource> _timeSyncLoops = new(StringComparer.OrdinalIgnoreCase);
         private readonly object _timeSyncLock = new();
@@ -1947,6 +1948,7 @@ namespace XPanel.Application
             
             // 绑定标签页切换事件
             LeftTabControl.SelectionChanged += (s, e) => UpdateTabContent();
+            PaintWorkspace.ConnectionProvider = GetSelectedPaintConnection;
             Loaded += MainWindow_Loaded;
 
             if (System.Windows.Application.Current is App app)
@@ -1990,28 +1992,56 @@ namespace XPanel.Application
             _trayIcon = new WinForms.NotifyIcon();
             _trayIcon.Text = "XPanelClient";
             
-            // 尝试加载自定义图标文件，否则使用默认图标
-            string iconPath = @"Resources/tray-icon.ico";
-            if (File.Exists(iconPath))
+            try
             {
-                _trayIcon.Icon = new System.Drawing.Icon(iconPath);
+                _trayIcon.Icon = CreateApplicationTrayIcon();
             }
-            else
+            catch (Exception ex)
             {
+                System.Diagnostics.Debug.WriteLine($"Failed to load application icon: {ex.Message}");
                 _trayIcon.Icon = CreateDefaultTrayIcon();
             }
 
             // 创建托盘菜单
             var contextMenu = new WinForms.ContextMenuStrip();
             contextMenu.Items.Add("显示", null, (s, e) => ShowWindow());
-            contextMenu.Items.Add("隐藏", null, (s, e) => HideWindow());
-            contextMenu.Items.Add("-");
             contextMenu.Items.Add("退出", null, (s, e) => ExitApplication());
 
             _trayIcon.ContextMenuStrip = contextMenu;
-            _trayIcon.DoubleClick += (s, e) => ToggleWindowVisibility();
+            _trayIcon.DoubleClick += (s, e) => ShowWindow();
             _trayIcon.Visible = true;
         }
+
+        private static System.Drawing.Icon CreateApplicationTrayIcon()
+        {
+            var resource = System.Windows.Application.GetResourceStream(
+                new Uri("pack://application:,,,/Resources/Icon.png", UriKind.Absolute));
+            if (resource == null)
+            {
+                throw new InvalidOperationException("Embedded application icon was not found.");
+            }
+
+            using (resource.Stream)
+            using (var bitmap = new System.Drawing.Bitmap(resource.Stream))
+            {
+                IntPtr iconHandle = bitmap.GetHicon();
+                try
+                {
+                    using (var icon = System.Drawing.Icon.FromHandle(iconHandle))
+                    {
+                        return (System.Drawing.Icon)icon.Clone();
+                    }
+                }
+                finally
+                {
+                    DestroyIcon(iconHandle);
+                }
+            }
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyIcon(IntPtr hIcon);
 
         private System.Drawing.Icon CreateDefaultTrayIcon()
         {
@@ -2027,6 +2057,7 @@ namespace XPanel.Application
 
         private void ShowWindow()
         {
+            this.ShowInTaskbar = true;
             this.Show();
             this.WindowState = WindowState.Normal;
             this.Visibility = Visibility.Visible;
@@ -2038,14 +2069,7 @@ namespace XPanel.Application
         {
             this.Visibility = Visibility.Hidden;
             this.WindowState = WindowState.Minimized;
-        }
-
-        private void ToggleWindowVisibility()
-        {
-            if (this.Visibility == Visibility.Visible && this.WindowState == WindowState.Normal)
-                HideWindow();
-            else
-                ShowWindow();
+            this.ShowInTaskbar = false;
         }
 
         private async void ExitApplication()
@@ -2096,6 +2120,7 @@ namespace XPanel.Application
             }
 
             _selectedDeviceKey = channelKey;
+            PaintWorkspace.OnSelectedDeviceChanged(channelKey);
 
             RefreshConnectedDeviceUi();
             RefreshSyncItemsUi();
@@ -2254,8 +2279,15 @@ namespace XPanel.Application
                 // 显示/隐藏对应的内容面板
                 DeviceInfoPanel.Visibility = LeftTabControl.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SyncPanel.Visibility = LeftTabControl.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
-                SettingsPanel.Visibility = LeftTabControl.SelectedIndex == 3 ? Visibility.Visible : Visibility.Collapsed;
+                SettingsPanel.Visibility = Visibility.Collapsed;
                 ClockStylePanel.Visibility = LeftTabControl.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+                PaintWorkspace.Visibility = LeftTabControl.SelectedIndex == 3 ? Visibility.Visible : Visibility.Collapsed;
+                if (_lastTabIndex == 3 && LeftTabControl.SelectedIndex != 3)
+                {
+                    PaintWorkspace.OnTabLeft();
+                }
+
+                _lastTabIndex = LeftTabControl.SelectedIndex;
                 if (LeftTabControl.SelectedIndex != 2)
                 {
                     _clockGifPreviewTimer.Stop();
@@ -2279,6 +2311,28 @@ namespace XPanel.Application
                     LoadClockPictureModes();
                 }
             }
+        }
+
+        private PaintConnection? GetSelectedPaintConnection()
+        {
+            if (string.IsNullOrEmpty(_selectedDeviceKey) ||
+                !_connectedDevices.TryGetValue(_selectedDeviceKey, out var device) ||
+                device.Status != DeviceConnectionVisualState.Connected ||
+                !device.SessionId.HasValue ||
+                device.CommunicationChannel == null)
+            {
+                return null;
+            }
+
+            return new PaintConnection(device.ChannelKey, device.CommunicationChannel, device.SessionId.Value, device.DeviceName);
+        }
+
+        private uint? GetConnectedSessionId(string channelKey)
+        {
+            return _connectedDevices.TryGetValue(channelKey, out var device) &&
+                   device.Status == DeviceConnectionVisualState.Connected
+                ? device.SessionId
+                : null;
         }
 
         private void ClockFontColor_Click(object sender, RoutedEventArgs e)
@@ -2626,7 +2680,7 @@ namespace XPanel.Application
             return tlvs.TryGetValue(type, out byte[]? bytes) && bytes.Length == 1 && (value = bytes[0]) == bytes[0];
         }
 
-        private static uint ComputeCrc32(byte[] data)
+        internal static uint ComputeCrc32(byte[] data)
         {
             uint crc = 0xFFFFFFFF;
             foreach (byte value in data)
@@ -2744,8 +2798,8 @@ namespace XPanel.Application
             new byte[] { 0x1E, 0x3F, 0x33, 0x33, 0x3F, 0x1F, 0x03, 0x33, 0x3F, 0x1E }, // 9
         };
 
-        // Normal 时钟字模：5 宽 x 8 高
-        private const int ClockNormalWidth = 5;
+        // Normal 时钟字模：6 宽 x 8 高（与设备端一致，字模数据只占低 5 位，第 0 列留空）
+        private const int ClockNormalWidth = 6;
         private const int ClockNormalHeight = 8;
 
         private static readonly byte[][] ClockNormalGlyphs =
@@ -2789,6 +2843,8 @@ namespace XPanel.Application
             int clockX = (int)Math.Round(ClockXSlider.Value);
             int clockY = (int)Math.Round(ClockYSlider.Value);
             bool bold = !(ClockFontCombo.SelectedItem is ComboBoxItem fontItem && (fontItem.Content as string) == "Normal");
+
+            RefreshClockBackgroundModePreviews(fontColor, clockX, clockY, bold);
 
             foreach (var file in files)
             {
@@ -2860,6 +2916,45 @@ namespace XPanel.Application
             if (_clockGifPreviews.Count > 0 && ClockStylePanel.Visibility == Visibility.Visible)
             {
                 _clockGifPreviewTimer.Start();
+            }
+        }
+
+        // 内置 Default Mode 背景资源（32x32 位图），与 Picture Mode 共用 LedMatrix + 时钟叠加渲染管线
+        private static readonly (string Tag, string ResourceUri)[] ClockBuiltInBackgrounds =
+        {
+            ("Matrix", "pack://application:,,,/Resources/Matrix.png"),
+            ("GravityBall", "pack://application:,,,/Resources/GravityBall.png"),
+            ("Music", "pack://application:,,,/Resources/Music.png"),
+        };
+
+        private void RefreshClockBackgroundModePreviews(System.Windows.Media.Color fontColor, int clockX, int clockY, bool bold)
+        {
+            UpdateClockBuiltInPreview(ClockModeMatrixPreview, "Matrix", fontColor, clockX, clockY, bold);
+            UpdateClockBuiltInPreview(ClockModeGravityBallPreview, "GravityBall", fontColor, clockX, clockY, bold);
+            UpdateClockBuiltInPreview(ClockModeMusicPreview, "Music", fontColor, clockX, clockY, bold);
+        }
+
+        private static void UpdateClockBuiltInPreview(
+            LedMatrixDisplay preview,
+            string tag,
+            System.Windows.Media.Color fontColor,
+            int clockX,
+            int clockY,
+            bool bold)
+        {
+            string? resourceUri = ClockBuiltInBackgrounds.FirstOrDefault(b => b.Tag == tag).ResourceUri;
+            if (resourceUri == null)
+            {
+                return;
+            }
+
+            try
+            {
+                preview.SourceBitmap = BuildClockPreviewBitmap(resourceUri, fontColor.R, fontColor.G, fontColor.B, clockX, clockY, bold);
+            }
+            catch
+            {
+                // 内置背景资源缺失或加载失败时保留原有画面
             }
         }
 
@@ -2955,6 +3050,7 @@ namespace XPanel.Application
             }
 
             ClockSettings settings = GatherClockSettingsFromUi(device.Clock);
+            WriteAppLog($"Clock apply clicked: key={channelKey}, backgroundMode={settings.BackgroundMode}", "ClockImage");
 
             if (settings.BackgroundMode == 11 &&
                 (string.IsNullOrEmpty(_selectedClockPictureMode) || !File.Exists(_selectedClockPictureMode)))
@@ -2965,35 +3061,14 @@ namespace XPanel.Application
 
             applyButton.IsEnabled = false;
             var progressWindow = new ClockApplyProgressWindow();
+            progressWindow.ShowPending();
             using var applyCts = new CancellationTokenSource(settings.BackgroundMode == 11
                 ? TimeSpan.FromSeconds(60)
                 : TimeSpan.FromSeconds(20));
-            int firstFeedbackReceived = 0;
-            using var firstFeedbackCts = CancellationTokenSource.CreateLinkedTokenSource(applyCts.Token);
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2), firstFeedbackCts.Token);
-                    if (Interlocked.CompareExchange(ref firstFeedbackReceived, 0, 0) == 0)
-                    {
-                        progressWindow.ShowFailure("No device feedback received.");
-                        applyCts.Cancel();
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                }
-            });
 
             void ReportClockFeedback(int value, string status)
             {
-                if (Interlocked.Exchange(ref firstFeedbackReceived, 1) == 0)
-                {
-                    firstFeedbackCts.Cancel();
-                }
-
-                progressWindow.ShowProgress(value, status);
+                progressWindow.ShowProgress(value);
             }
 
             try
@@ -3023,17 +3098,17 @@ namespace XPanel.Application
                 {
                     device.Clock = settings;
                     SaveSavedDevicesToConfig();
-                    progressWindow.ShowSuccess("Clock style applied successfully.");
+                    progressWindow.ShowSuccess();
                 }
                 else
                 {
-                    progressWindow.ShowFailure("Clock style apply failed.");
+                    progressWindow.ShowFailure();
                 }
             }
             catch (Exception ex)
             {
                 WriteAppLog($"Clock apply failed: key={channelKey}, reason={ex.Message}", "ClockConfig");
-                progressWindow.ShowFailure("Clock style apply failed.");
+                progressWindow.ShowFailure();
             }
             finally
             {
@@ -3253,6 +3328,7 @@ namespace XPanel.Application
             CancellationToken cancellationToken,
             Action<int, string> reportFeedback)
         {
+            WriteAppLog($"Clock image preparing: path={imagePath}", "ClockImage");
             byte formatCode = GetClockImageFormatCode(imagePath);
             if (formatCode == 0)
             {
@@ -3309,7 +3385,13 @@ namespace XPanel.Application
             configSet.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
             configSet.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
 
-            if (!await SendClockRequestAwaitRespAsync(channel, configSet, "clock.config_set", cancellationToken, reportFeedback))
+            if (!await SendClockRequestAwaitRespAsync(
+                channel,
+                configSet,
+                "clock.config_set",
+                cancellationToken,
+                reportFeedback,
+                responseTimeout: TimeSpan.FromSeconds(15)))
             {
                 return false;
             }
@@ -3361,7 +3443,13 @@ namespace XPanel.Application
             commit.Tlvs[XpfProtocolConstants.TlvChunkTotal] = XpfCodec.EncodeUInt16((ushort)chunkTotal);
             commit.Tlvs[XpfProtocolConstants.TlvChunkCrc32] = XpfCodec.EncodeUInt32(crc32);
 
-            bool committed = await SendClockRequestAwaitRespAsync(channel, commit, "clock.config_commit", cancellationToken, reportFeedback);
+            bool committed = await SendClockRequestAwaitRespAsync(
+                channel,
+                commit,
+                "clock.config_commit",
+                cancellationToken,
+                reportFeedback,
+                responseTimeout: TimeSpan.FromSeconds(15));
             if (committed)
             {
                 reportFeedback(100, "Image transfer completed.");
@@ -3376,7 +3464,8 @@ namespace XPanel.Application
             XpfFrame request,
             string logContext,
             CancellationToken cancellationToken,
-            Action<int, string>? reportFeedback = null)
+            Action<int, string>? reportFeedback = null,
+            TimeSpan? responseTimeout = null)
         {
             uint msgId = request.MsgId;
             var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3440,8 +3529,10 @@ namespace XPanel.Application
                     return false;
                 }
 
+                WriteAppLog($"{logContext} GATT write completed: msgId={msgId}", "ClockImage");
+
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                timeoutCts.CancelAfter(responseTimeout ?? TimeSpan.FromSeconds(5));
                 using var reg = timeoutCts.Token.Register(() => responseTcs.TrySetCanceled(timeoutCts.Token));
 
                 XpfFrame response;
@@ -3451,7 +3542,11 @@ namespace XPanel.Application
                 }
                 catch (OperationCanceledException)
                 {
-                    WriteAppLog($"{logContext} RESP timeout: msgId={msgId}", "ClockImage");
+                    WriteAppLog(
+                        cancellationToken.IsCancellationRequested
+                            ? $"{logContext} canceled: msgId={msgId}"
+                            : $"{logContext} RESP timeout: msgId={msgId}",
+                        "ClockImage");
                     return false;
                 }
 
@@ -3527,26 +3622,22 @@ namespace XPanel.Application
                 return new[] { new ClockPreviewFrame(BuildClockPreviewBitmap(filePath, red, green, blue, clockX, clockY, bold), 100) };
             }
 
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var decoder = new GifBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            return decoder.Frames
-                .Select(frame => new ClockPreviewFrame(
-                    BuildClockPreviewBitmap(frame, red, green, blue, clockX, clockY, bold),
-                    GetClockGifFrameDelay(frame.Metadata as BitmapMetadata)))
-                .ToList();
-        }
+            using var animation = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(filePath);
+            var frames = new List<ClockPreviewFrame>();
+            foreach (var frame in animation.Frames)
+            {
+                var pixels = new byte[frame.Width * frame.Height * 4];
+                frame.CopyPixelDataTo(pixels);
+                var bitmap = BitmapSource.Create(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null, pixels, frame.Width * 4);
+                bitmap.Freeze();
+                int delayCentiseconds = SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(frame.Metadata).FrameDelay;
+                int delayMilliseconds = delayCentiseconds == 0 ? 100 : Math.Max(20, delayCentiseconds * 10);
+                frames.Add(new ClockPreviewFrame(
+                    BuildClockPreviewBitmap(bitmap, red, green, blue, clockX, clockY, bold),
+                    delayMilliseconds));
+            }
 
-        private static int GetClockGifFrameDelay(BitmapMetadata? metadata)
-        {
-            try
-            {
-                object? value = metadata?.GetQuery("/grctlext/Delay");
-                return Math.Max(20, Convert.ToInt32(value ?? 10) * 10);
-            }
-            catch
-            {
-                return 100;
-            }
+            return frames;
         }
 
         // 加载背景图并叠加 12:00 时钟数字，供 LED 预览渲染
@@ -4084,6 +4175,7 @@ namespace XPanel.Application
 
         private void RefreshConnectedDeviceUi()
         {
+            PaintWorkspace.InvalidateIfStale(GetConnectedSessionId);
             ConnectedDevicesPanel.Children.Clear();
             if (_connectedDevices.Count == 0)
             {
@@ -5003,7 +5095,7 @@ namespace XPanel.Application
             return unchecked((int)raw);
         }
 
-        private static bool TryExtractFirstXpfFrame(List<byte> buffer, out byte[] frameBytes)
+        internal static bool TryExtractFirstXpfFrame(List<byte> buffer, out byte[] frameBytes)
         {
             frameBytes = Array.Empty<byte>();
             const int headerLength = 24;
@@ -5603,51 +5695,49 @@ namespace XPanel.Application
 
         private sealed class ClockApplyProgressWindow : Window
         {
-            private readonly TextBlock _icon;
             private readonly TextBlock _statusText;
             private readonly ProgressBar _progressBar;
+            private readonly DispatcherTimer _autoCloseTimer;
 
             public ClockApplyProgressWindow()
             {
                 Title = "Clock Style";
                 Width = 360;
-                Height = 180;
+                Height = 100;
                 Owner = System.Windows.Application.Current?.Windows.OfType<MainWindow>().FirstOrDefault();
                 WindowStartupLocation = WindowStartupLocation.CenterOwner;
                 ResizeMode = ResizeMode.NoResize;
 
-                _icon = new TextBlock
-                {
-                    Text = "...",
-                    FontSize = 28,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243)),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                };
                 _statusText = new TextBlock
                 {
-                    Text = "Waiting for device feedback...",
-                    FontSize = 14,
+                    Visibility = Visibility.Collapsed,
+                    FontSize = 18,
+                    FontWeight = FontWeights.Bold,
                     Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(70, 70, 70)),
                     HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 10, 0, 0),
                 };
                 _progressBar = new ProgressBar
                 {
                     Minimum = 0,
                     Maximum = 100,
                     Height = 10,
-                    Margin = new Thickness(20, 20, 20, 0),
+                    Margin = new Thickness(20),
+                };
+                _autoCloseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+                _autoCloseTimer.Tick += (_, _) =>
+                {
+                    _autoCloseTimer.Stop();
+                    Close();
                 };
 
                 Content = new StackPanel
                 {
                     VerticalAlignment = VerticalAlignment.Center,
-                    Children = { _icon, _statusText, _progressBar },
+                    Children = { _progressBar, _statusText },
                 };
             }
 
-            public void ShowProgress(int value, string status)
+            public void ShowProgress(int value)
             {
                 Dispatcher.InvokeAsync(() =>
                 {
@@ -5656,15 +5746,25 @@ namespace XPanel.Application
                         Show();
                     }
 
-                    _icon.Text = "...";
-                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(33, 150, 243));
                     _progressBar.Visibility = Visibility.Visible;
                     _progressBar.Value = Math.Clamp(value, 0, 100);
-                    _statusText.Text = status;
+                    _statusText.Visibility = Visibility.Collapsed;
+                    _autoCloseTimer.Stop();
                 });
             }
 
-            public void ShowFailure(string status)
+            public void ShowPending()
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsVisible)
+                    {
+                        Show();
+                    }
+                });
+            }
+
+            public void ShowFailure()
             {
                 Dispatcher.InvokeAsync(() =>
                 {
@@ -5673,14 +5773,14 @@ namespace XPanel.Application
                         Show();
                     }
 
-                    _icon.Text = "X";
-                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 67, 54));
                     _progressBar.Visibility = Visibility.Collapsed;
-                    _statusText.Text = status;
+                    _statusText.Text = "Failed";
+                    _statusText.Visibility = Visibility.Visible;
+                    _autoCloseTimer.Start();
                 });
             }
 
-            public void ShowSuccess(string status)
+            public void ShowSuccess()
             {
                 Dispatcher.InvokeAsync(() =>
                 {
@@ -5689,10 +5789,10 @@ namespace XPanel.Application
                         Show();
                     }
 
-                    _icon.Text = "OK";
-                    _icon.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(76, 175, 80));
                     _progressBar.Visibility = Visibility.Collapsed;
-                    _statusText.Text = status;
+                    _statusText.Text = "OK";
+                    _statusText.Visibility = Visibility.Visible;
+                    _autoCloseTimer.Start();
                 });
             }
         }

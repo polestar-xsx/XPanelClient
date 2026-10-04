@@ -1,7 +1,9 @@
 <Window x:Class="XPanel.Application.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:XPanel.Application"
         Title="XPanel Device Client" Height="700" Width="1100"
+        Icon="pack://application:,,,/Resources/Icon.png"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False"
         Visibility="Hidden"
@@ -299,7 +301,7 @@
                         <TabItem Header="Clock Style" Background="#FFF0C2" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
-                        <TabItem Header="System Settings" Background="#DDEEDB" Style="{StaticResource ModernTabItemStyle}">
+                        <TabItem Header="Paint" Background="#DDEEDB" Style="{StaticResource ModernTabItemStyle}">
                             <Grid/>
                         </TabItem>
                     </TabControl>
@@ -388,6 +390,10 @@
                             </StackPanel>
                         </Border>
                     </StackPanel>
+
+                    <!-- Paint Panel -->
+                    <local:PaintPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+                                      x:Name="PaintWorkspace" Visibility="Collapsed"/>
 
                     <!-- Clock Style Panel -->
                     <ScrollViewer Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Name="ClockStylePanel" Margin="0" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
@@ -513,8 +519,8 @@
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/Matrix.png"
-                                                   Width="128" Height="128" Stretch="Uniform"/>
+                                            <local:LedMatrixDisplay x:Name="ClockModeMatrixPreview"
+                                                   LedCellSize="4" LedDiameter="3"/>
                                             <TextBlock Text="Matrix" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>
@@ -524,8 +530,8 @@
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/GravityBall.png"
-                                                   Width="128" Height="128" Stretch="Uniform"/>
+                                            <local:LedMatrixDisplay x:Name="ClockModeGravityBallPreview"
+                                                   LedCellSize="4" LedDiameter="3"/>
                                             <TextBlock Text="GravityBall" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>
@@ -535,8 +541,8 @@
                                             BorderBrush="#E0E0E0" BorderThickness="2" CornerRadius="8" Cursor="Hand"
                                             MouseLeftButtonUp="ClockBackgroundMode_Click">
                                         <StackPanel Margin="8">
-                                            <Image Source="pack://application:,,,/Resources/Music.png"
-                                                   Width="128" Height="128" Stretch="Uniform"/>
+                                            <local:LedMatrixDisplay x:Name="ClockModeMusicPreview"
+                                                   LedCellSize="4" LedDiameter="3"/>
                                             <TextBlock Text="Music" HorizontalAlignment="Center" FontSize="13"
                                                        FontWeight="SemiBold" Foreground="#333" Margin="0,8,0,0"/>
                                         </StackPanel>

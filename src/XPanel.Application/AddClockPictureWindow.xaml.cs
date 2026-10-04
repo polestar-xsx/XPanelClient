@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using SixLabors.ImageSharp.Formats.Gif;
+using SixLabors.ImageSharp.Processing.Processors.Quantization;
 using ImageSharpImage = SixLabors.ImageSharp.Image;
 using ImageSharpBgra32 = SixLabors.ImageSharp.PixelFormats.Bgra32;
 using WinForms = System.Windows.Forms;
@@ -246,30 +247,16 @@ namespace XPanel.Application
 
         private void LoadGifFrames(string filePath)
         {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var decoder = new GifBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            foreach (BitmapFrame frame in decoder.Frames)
+            using var animation = ImageSharpImage.Load<ImageSharpBgra32>(filePath);
+            foreach (var frame in animation.Frames)
             {
-                var converted = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
-                int width = converted.PixelWidth;
-                int height = converted.PixelHeight;
+                int width = frame.Width;
+                int height = frame.Height;
                 var pixels = new byte[width * height * 4];
-                converted.CopyPixels(pixels, width * 4, 0);
-                _gifFrames.Add(new GifSourceFrame(pixels, width, height, GetGifFrameDelay(frame.Metadata as BitmapMetadata)));
-            }
-        }
-
-        private static int GetGifFrameDelay(BitmapMetadata? metadata)
-        {
-            try
-            {
-                object? value = metadata?.GetQuery("/grctlext/Delay");
-                int delayCentiseconds = value == null ? 10 : Convert.ToInt32(value);
-                return Math.Max(20, delayCentiseconds * 10);
-            }
-            catch
-            {
-                return 100;
+                frame.CopyPixelDataTo(pixels);
+                int delayCentiseconds = SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(frame.Metadata).FrameDelay;
+                int delayMilliseconds = delayCentiseconds == 0 ? 100 : Math.Max(20, delayCentiseconds * 10);
+                _gifFrames.Add(new GifSourceFrame(pixels, width, height, delayMilliseconds));
             }
         }
 
@@ -315,6 +302,7 @@ namespace XPanel.Application
             SixLabors.ImageSharp.Image<ImageSharpBgra32>? animation = null;
             try
             {
+                byte[]? previousPixels = null;
                 for (int index = 0; index < _gifFrames.Count; index++)
                 {
                     SetGifFrame(index);
@@ -324,12 +312,25 @@ namespace XPanel.Application
                         throw new InvalidOperationException("GIF frame rendering failed.");
                     }
 
+                    int frameDelay = Math.Max(2, _gifFrames[index].DelayMilliseconds / 10);
+                    if (animation != null && previousPixels != null && _previewPixels.AsSpan().SequenceEqual(previousPixels))
+                    {
+                        var previousMetadata = SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(
+                            animation.Frames[animation.Frames.Count - 1].Metadata);
+                        if (previousMetadata.FrameDelay + frameDelay <= ushort.MaxValue)
+                        {
+                            previousMetadata.FrameDelay += frameDelay;
+                            continue;
+                        }
+                    }
+
+                    previousPixels = (byte[])_previewPixels.Clone();
                     using var renderedFrame = ImageSharpImage.LoadPixelData<ImageSharpBgra32>(
                         _previewPixels,
                         MatrixSize,
                         MatrixSize);
                     SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(renderedFrame.Frames.RootFrame.Metadata).FrameDelay =
-                        Math.Max(2, _gifFrames[index].DelayMilliseconds / 10);
+                        frameDelay;
                     SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(renderedFrame.Frames.RootFrame.Metadata).DisposalMethod =
                         GifDisposalMethod.RestoreToBackground;
 
@@ -350,17 +351,12 @@ namespace XPanel.Application
                 }
 
                 var encoder = new GifEncoder { ColorTableMode = GifColorTableMode.Global };
+                using var baselineStream = new MemoryStream();
+                animation.Save(baselineStream, encoder);
+                byte[] optimizedBytes = OptimizeAnimatedGif(baselineStream.ToArray());
                 using (var stream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write))
                 {
-                    animation.Save(stream, encoder);
-                }
-
-                using var verified = ImageSharpImage.Load(filePath);
-                if (verified.Frames.Count != _gifFrames.Count)
-                {
-                    File.Delete(filePath);
-                    throw new InvalidDataException(
-                        $"GIF verification failed: expected {_gifFrames.Count} frames, decoded {verified.Frames.Count}.");
+                    stream.Write(optimizedBytes);
                 }
             }
             finally
@@ -370,6 +366,87 @@ namespace XPanel.Application
                 RenderPreview();
                 StartGifPreviewTimer();
             }
+        }
+
+        private static byte[] OptimizeAnimatedGif(byte[] baselineBytes)
+        {
+            using var baseline = ImageSharpImage.Load<ImageSharpBgra32>(baselineBytes);
+            var referencePixels = new List<byte[]>();
+            var palette = new List<SixLabors.ImageSharp.Color>();
+            var paletteKeys = new HashSet<int>();
+            foreach (var frame in baseline.Frames)
+            {
+                var pixels = new byte[frame.Width * frame.Height * 4];
+                frame.CopyPixelDataTo(pixels);
+                referencePixels.Add(pixels);
+                for (int offset = 0; offset < pixels.Length; offset += 4)
+                {
+                    if (paletteKeys.Add(BitConverter.ToInt32(pixels, offset)))
+                    {
+                        palette.Add(SixLabors.ImageSharp.Color.FromRgba(
+                            pixels[offset + 2], pixels[offset + 1], pixels[offset], pixels[offset + 3]));
+                    }
+                }
+            }
+
+            byte[] smallest = baselineBytes;
+            if (palette.Count > 256)
+            {
+                return smallest;
+            }
+
+            var quantizer = new PaletteQuantizer(palette.ToArray(), new QuantizerOptions { Dither = null });
+            foreach (GifColorTableMode tableMode in new[] { GifColorTableMode.Global, GifColorTableMode.Local })
+            {
+                foreach (GifDisposalMethod disposal in new[] { GifDisposalMethod.NotDispose, GifDisposalMethod.RestoreToBackground })
+                {
+                    using var candidate = baseline.Clone();
+                    foreach (var frame in candidate.Frames)
+                    {
+                        var metadata = SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(frame.Metadata);
+                        metadata.ColorTableMode = tableMode;
+                        metadata.DisposalMethod = disposal;
+                    }
+
+                    using var stream = new MemoryStream();
+                    candidate.Save(stream, new GifEncoder { ColorTableMode = tableMode, Quantizer = quantizer });
+                    if (stream.Length >= smallest.Length)
+                    {
+                        continue;
+                    }
+
+                    byte[] candidateBytes = stream.ToArray();
+                    using var decoded = ImageSharpImage.Load<ImageSharpBgra32>(candidateBytes);
+                    if (decoded.Width != baseline.Width || decoded.Height != baseline.Height ||
+                        decoded.Frames.Count != baseline.Frames.Count ||
+                        SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(decoded.Metadata).RepeatCount !=
+                        SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(baseline.Metadata).RepeatCount)
+                    {
+                        continue;
+                    }
+
+                    bool matches = true;
+                    for (int index = 0; index < decoded.Frames.Count; index++)
+                    {
+                        var pixels = new byte[referencePixels[index].Length];
+                        decoded.Frames[index].CopyPixelDataTo(pixels);
+                        if (!pixels.AsSpan().SequenceEqual(referencePixels[index]) ||
+                            SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(decoded.Frames[index].Metadata).FrameDelay !=
+                            SixLabors.ImageSharp.MetadataExtensions.GetGifMetadata(baseline.Frames[index].Metadata).FrameDelay)
+                        {
+                            matches = false;
+                            break;
+                        }
+                    }
+
+                    if (matches)
+                    {
+                        smallest = candidateBytes;
+                    }
+                }
+            }
+
+            return smallest;
         }
 
         private void RebuildDisplayPixels()

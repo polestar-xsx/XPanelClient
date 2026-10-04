@@ -154,6 +154,8 @@ T(1B) + L(2B) + V(L bytes)
 | 6 | Tetris |
 | 7 | Radio |
 | 8 | Reset |
+| 9 | NotiShow |
+| 10 | Paint（仅可通过 `paint.begin` 进入，见 §16） |
 
 ### 4.2 服务 ID 预留段
 
@@ -199,6 +201,14 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0080 | clock.config_set |
 | 0x0081 | clock.bg_chunk |
 | 0x0082 | clock.config_commit |
+| 0x0090 | paint.begin |
+| 0x0091 | paint.stroke |
+| 0x0092 | paint.fill |
+| 0x0093 | paint.frame_begin |
+| 0x0094 | paint.frame_chunk |
+| 0x0095 | paint.frame_end |
+| 0x0096 | paint.sync |
+| 0x0097 | paint.end |
 | 0x00F0 | system.reboot |
 
 ---
@@ -387,6 +397,8 @@ T(1B) + L(2B) + V(L bytes)
 | 4051 | Clock Background Transfer Busy（已有背景图片传输未完成） |
 | 4052 | Clock Background Chunk Error（传输ID错误、缺片、重复、越界或超时） |
 | 4053 | Clock Background Verify Failed（图片大小或 CRC32 校验失败） |
+| 4060 | Paint Not Active（Paint 会话未开始） |
+| 4061 | Paint Frame Error（关键帧 ID 不匹配、缺片、乱序、超长、超时或 CRC32 校验失败） |
 | 5001 | Internal Error |
 | 5002 | Storage Error |
 | 5003 | Network Error |
@@ -1197,6 +1209,487 @@ byte_offset = (y * shot_width + x) * shot_bytes_per_pixel
 67 00 04 00 00 00 2A   // clock_transfer_id=42
 21 00 02 00 06         // chunk_total=6
 22 00 04 DE AD BE EF   // chunk_crc32
+```
+
+---
+
+## 16. 画板（Paint）实时同步规范
+
+目标:
+- 控制端提供与设备画布同尺寸的模拟画布，用户可加载图片，也可用画笔自由涂画；设备端实时镜像控制端画布。
+- 笔画走低延迟的“操作流”；图片加载、撤销/重做、纠错走“像素关键帧”；通过序号与 CRC32 实现最终一致。
+
+### 16.1 基本约定
+
+1. 权威来源
+- 控制端是画布内容的唯一权威来源。撤销/重做历史、图片解码、缩放、抖动均只在控制端完成。
+- 设备端只按本节规则执行收到的操作，不保存历史，不解码图片文件。
+
+2. 坐标系
+- 逻辑坐标，原点在左上角，x 向右递增，y 向下递增。
+- 画布宽高以 `paint.begin` 响应中的 `paint_width` / `paint_height` 为准（当前固件为 32x32），控制端不得写死。
+- 合法坐标: `0 <= x < paint_width`，`0 <= y < paint_height`。
+
+3. 颜色与像素格式（唯一格式，无协商）
+- 所有颜色（画笔、填充）和所有像素数据统一为 RGB888: 每像素 3 字节，顺序固定为 `R, G, B`，每通道 `0~255`。
+- 不支持 RGB565、调色板或 alpha 通道。
+- 画布中存储的是原始颜色值；设备显示时叠加的全局亮度与 HUB75 伽马处理不写入画布，也不参与 CRC 计算。
+
+4. 绘制模型
+- 覆盖写: 目标像素直接替换为新颜色，不做混合。
+- 橡皮擦即颜色为 `(0,0,0)` 的普通笔画，协议不定义独立的橡皮擦操作。
+
+5. 画布字节流（关键帧与 CRC 共用）
+- 按行优先: 从上到下逐行，每行从左到右，每像素 `R, G, B`，无行填充。
+- 区域 `rect=(rx, ry, rw, rh)` 的字节流只包含区域内像素，像素 `(x, y)` 的字节偏移为:
+
+```text
+offset = ((y - ry) * rw + (x - rx)) * 3
+```
+
+- 整个画布即 `rect=(0, 0, paint_width, paint_height)`，32x32 时为 3072 字节。
+
+6. CRC32 算法
+- CRC-32/ISO-HDLC（与 zlib `crc32()`、固件 `crc32Ieee()` 相同）: 反射多项式 `0xEDB88320`，初值 `0xFFFFFFFF`，结果异或 `0xFFFFFFFF`。
+- 自检: ASCII `"123456789"` 的 CRC32 为 `0xCBF43926`。
+- `paint_canvas_crc32` = 对整个画布字节流（第 5 条）计算的 CRC32。
+
+7. 会话
+- 所有 Paint 请求必须携带有效 `session_id(0x0E)`。
+- 会话检查遵循附录 B.4/B.5: 即使 `need_ack=0`，会话错误也会返回 `error`（4010/4011）。
+
+### 16.2 路由与操作
+
+所有 Paint 消息均使用 `app_id = 10 (Paint)`。
+
+| op_code | 名称 | 方向 | msg_type | need_ack | qos_level | 设备回包 |
+|---:|---|---|---|---:|---:|---|
+| 0x0090 | paint.begin | C→D | cmd | 1 | 1 | resp / error |
+| 0x0091 | paint.stroke | C→D | cmd | 0 | 0 | 无 |
+| 0x0092 | paint.fill | C→D | cmd | 0 | 0 | 无 |
+| 0x0093 | paint.frame_begin | C→D | cmd | 1 | 1 | resp / error |
+| 0x0094 | paint.frame_chunk | C→D | cmd | 0 | 0 | 无 |
+| 0x0095 | paint.frame_end | C→D | cmd | 1 | 1 | resp / error |
+| 0x0096 | paint.sync | C→D | cmd | 1 | 1 | resp / error |
+| 0x0096 | paint.sync | D→C | event | 0 | 0 | 控制端不回包 |
+| 0x0097 | paint.end | C→D | cmd | 1 | 1 | resp / error |
+| 0x0097 | paint.end | D→C | event | 0 | 0 | 控制端不回包 |
+
+回包规则:
+- `need_ack=1` 的请求，设备只返回一个 `resp`（成功）或一个 `error`（失败），不再额外发送 `ack`。两者均携带 `ack_for_msg_id(0x01)`。
+- `need_ack=0` 的请求（stroke / fill / frame_chunk），除会话错误（16.1 第 7 条）外，设备不返回任何 `ack/resp/error`。业务层异常只通过 `paint.sync` 的 `out_of_sync` 标志或 `paint.frame_end` 的结果反映。
+- 控制端必须按上表设置 `need_ack`。如果请求的 `need_ack` 与上表不符，设备不执行该请求；若该请求 `need_ack=1`，设备返回 `4001`。
+- Paint 的 op_code 若使用了 `app_id != 10`，设备返回 `4004 Invalid AppId`（仅在 `need_ack=1` 时回包）。
+
+### 16.3 Paint TLV 类型表（0x70~0x7F）
+
+所有 TLV 长度固定（`paint_points`、`paint_pixels` 除外），设备必须严格校验长度。
+
+| T(hex) | 名称 | V 类型 | 长度 | 说明 |
+|---|---|---|---:|---|
+| 0x70 | paint_seq | uint16 | 2 | 操作序号，规则见 16.5 |
+| 0x71 | paint_color | bytes | 3 | RGB888，顺序 `R, G, B` |
+| 0x72 | paint_brush_shape | uint8 | 1 | `1=square`，`2=round`，其他值非法 |
+| 0x73 | paint_brush_size | uint8 | 1 | 笔刷直径（像素），`1~8` |
+| 0x74 | paint_stroke_flags | uint8 | 1 | bit0=STROKE_START，bit1=STROKE_END；bit2~7 发送端置 0，接收端忽略 |
+| 0x75 | paint_points | bytes | 2N | `N` 个点，每点 `x(uint8), y(uint8)`；`1 <= N <= 64` |
+| 0x76 | paint_rect | bytes | 4 | `x, y, w, h`，各 uint8 |
+| 0x77 | paint_frame_id | uint32 | 4 | 关键帧 ID，控制端生成，非 0 |
+| 0x78 | paint_pixels | bytes | 1~65535 | 关键帧像素分片（16.1 第 5 条字节流的连续片段） |
+| 0x79 | paint_total_size | uint32 | 4 | 关键帧像素总字节数，必须等于 `w * h * 3` |
+| 0x7A | paint_canvas_crc32 | uint32 | 4 | 设备当前整个画布的 CRC32 |
+| 0x7B | paint_sync_flags | uint8 | 1 | bit0=out_of_sync，bit1=frame_transfer_active；bit2~7 为 0 |
+| 0x7C | paint_width | uint16 | 2 | 画布宽度（像素） |
+| 0x7D | paint_height | uint16 | 2 | 画布高度（像素） |
+| 0x7E | (reserved) | - | - | 保留 |
+| 0x7F | paint_end_reason | uint8 | 1 | `1=device_user`（用户在设备上切走），`2=device_system`（系统原因，如强制休眠、重启） |
+
+关键帧复用通用 TLV:
+- `chunk_index(0x20)`: 分片序号，从 0 开始
+- `chunk_total(0x21)`: 分片总数，`>= 1`
+- `chunk_crc32(0x22)`: 关键帧像素字节流（仅 rect 区域）的 CRC32
+
+### 16.4 设备端 Paint 状态与生命周期
+
+设备维护以下状态:
+
+| 状态 | 说明 |
+|---|---|
+| active | Paint 会话是否激活 |
+| canvas | `paint_width * paint_height * 3` 字节的 RGB888 画布 |
+| last_seq | 最近一次被接受的 `paint_seq`（uint16） |
+| last_point | 上一笔画末点（含 valid 标志） |
+| out_of_sync | 设备已知自身画布可能与控制端不一致 |
+| frame transfer | 当前关键帧传输（frame_id、rect、已收字节、下一期望 chunk_index、失败标志、接收缓冲区） |
+| prev_app | 进入 Paint 前的 App |
+
+生命周期规则:
+
+1. 进入
+- Paint 只能通过 `paint.begin` 进入；不参与设备按键的 App 轮换。`app.switch` 目标为 10 时返回 `4004`。
+
+2. `paint.begin`（任意状态下均可调用）
+- 若当前未激活: 记录当前 App 为 `prev_app`，然后切换到 Paint。
+- 若已激活: 保留原 `prev_app` 不变。
+- 无论是否已激活，都执行以下重置: 画布全部置为 `(0,0,0)`；`last_seq=0`；`last_point` 置为无效；`out_of_sync=false`；放弃进行中的关键帧传输。
+
+3. 控制端退出（`paint.end` cmd）
+- 设备将记录的 `prev_app` 重置为 Clock（`app_id=2`），放弃关键帧传输，丢弃画布，切回 Clock，返回 `resp`。
+- 未激活时收到 `paint.end` 也返回 `resp`（幂等）。
+- 退出后恢复通知展示和其他自动跳转；遗留的 Paint 返回目标一律按 Clock 处理，不得重新进入 Paint。
+
+4. 设备端退出
+- 用户在设备上切换 App，或系统原因（低电强制休眠、重启前等）导致退出时，设备先发送 `paint.end` event（携带 `paint_end_reason`），再退出 Paint。
+
+5. 会话失效
+- BLE 断开、`session.bye`、重新 `session.hello` 都会使会话失效。此时设备直接退出 Paint 并切回 `prev_app`，不发送 event。
+- 控制端重新握手后，必须重新 `paint.begin`。
+
+6. 未激活时收到请求
+- `need_ack=1` 的请求（`paint.begin` / `paint.end` 除外）返回 `4060`。
+- `need_ack=0` 的请求静默丢弃。
+
+7. 通知隔离与休眠
+- Paint 激活期间，任何通知消息均不得打断 Paint 或自动切换到其他 App，包括天气自动展示、图片通知和时钟配置引发的自动展示。
+- 天气与时钟配置数据仍正常更新，但不触发界面跳转；图片通知跳过展示并释放其临时图片缓冲区，不进入显示队列。
+- 用户主动按键切换、`paint.end`、会话失效和系统强制退出仍按上述生命周期规则执行。
+- Paint 激活期间，设备不因“无操作超时”进入休眠。
+
+### 16.5 序号规则（paint_seq）
+
+1. 消耗序号的操作只有 `paint.stroke`、`paint.fill`、`paint.frame_begin` 三种；其他 Paint 消息不携带 `paint_seq`。
+
+2. 控制端分配规则
+- `paint.begin` 成功后，控制端本地 `last_sent_seq = 0`。
+- 每个新操作使用 `seq = (last_sent_seq + 1) mod 65536`。第一个操作为 1；65535 之后为 0。
+- 序号不得复用于不同内容。唯一例外: `paint.frame_begin` 收到 `error` 时序号未被消耗，重试时可复用该序号。
+
+3. 设备判定规则
+- 设备计算 `d = (uint16)(seq - last_seq)`:
+
+| d | 判定 | 设备行为 |
+|---|---|---|
+| `0` 或 `>= 0x8000` | 重复/过期 | stroke/fill: 丢弃，不改变任何状态；frame_begin: 返回 `4001`（`Stale paint_seq`），不消耗序号 |
+| `1` | 正常 | 执行，然后 `last_seq = seq` |
+| `2 ~ 0x7FFF` | 有丢包 | 先 `out_of_sync = true` 并将 `last_point` 置为无效，再执行，然后 `last_seq = seq` |
+
+4. 无效包
+- stroke/fill 通过序号判定后，若字段缺失、长度错误或取值越界，则: 不修改画布；`out_of_sync = true`；`last_point` 置为无效；`last_seq = seq`（序号视为已消耗）。
+- 若 `paint_seq` 本身缺失或长度错误，则整包丢弃，并置 `out_of_sync = true`。
+
+### 16.6 paint.begin
+
+请求 TLV:
+- 必填 `session_id(0x0E)`
+
+成功 `resp` TLV:
+- `ack_for_msg_id(0x01)`
+- `paint_width(0x7C)`、`paint_height(0x7D)`
+- `paint_seq(0x70)`，固定为 `0`
+- `paint_canvas_crc32(0x7A)`，即全黑画布的 CRC32
+
+控制端收到 `resp` 后:
+- 将本地画布初始化为同尺寸全黑，并置 `last_sent_seq = 0`。
+- 若需要初始图片，随后发送一个整幅关键帧（16.10）。
+
+失败:
+- 画布缓冲区分配失败返回 `5001`。
+
+### 16.7 paint.stroke（画笔）
+
+请求 TLV（全部必填，每包都要携带，包与包之间不继承颜色或笔刷）:
+- `session_id(0x0E)`
+- `paint_seq(0x70)`
+- `paint_color(0x71)`
+- `paint_brush_shape(0x72)`
+- `paint_brush_size(0x73)`
+- `paint_stroke_flags(0x74)`
+- `paint_points(0x75)`
+
+字段约束:
+- `paint_points` 的长度必须为偶数，`N = L / 2`，`1 <= N <= 64`；每个点都必须在画布范围内。违反任一条按无效包处理（16.5 第 4 条）。
+
+设备执行算法（点为 `P0 .. P(N-1)`）:
+
+1. 若 `STROKE_START=1`，或本包判定为丢包，或 `last_point` 无效: 在 `P0` 盖一次笔刷。否则: 绘制线段 `last_point -> P0`。
+2. 对 `i = 1 .. N-1`，依次绘制线段 `P(i-1) -> P(i)`。
+3. 若 `STROKE_END=1`: `last_point` 置为无效；否则 `last_point = P(N-1)`。
+
+补充规则:
+- 所有线段（包括第 1 步连接上一包末点的那一段）都使用本包的颜色和笔刷。
+- 单击画点: `N=1`，`paint_stroke_flags=0x03`。
+- 一笔跨多个包时: 首包 `STROKE_START=1`，中间包为 `0x00`，末包 `STROKE_END=1`。
+
+控制端发送建议（不影响互通）:
+- 每 20~30ms 合并一次指针事件，作为一包发送。
+- 去掉与前一点相同的连续点。中间像素无需发送，由设备端插值。
+- 发送前用本节算法在本地画布上执行同样的绘制，以保证 CRC 一致。
+
+帧长:
+- `24(header) + 7(session_id) + 5(seq) + 6(color) + 4(shape) + 4(size) + 4(flags) + 3 + 2N = 57 + 2N` 字节，`N=64` 时为 185 字节。
+- BLE 控制端应协商 MTU `>= 247`，使单帧不超过 `MTU - 3`、无需 §6.1 分片。若 MTU 较小，控制端应减小 `N`，使单帧 `<= MTU - 3`。
+
+### 16.8 笔刷与线段光栅化（双方必须逐像素一致）
+
+盖笔刷 `stamp(cx, cy)`，其中 `d = paint_brush_size`:
+
+```text
+x0 = cx - (d - 1) / 2        // 整数除法向下取整，d 为偶数时笔刷偏向右下
+y0 = cy - (d - 1) / 2
+for py in [y0, y0 + d - 1]:
+  for px in [x0, x0 + d - 1]:
+    if shape == round:
+      u = 2 * (px - x0) - (d - 1)
+      v = 2 * (py - y0) - (d - 1)
+      if u*u + v*v > (d - 1)*(d - 1) + 1: continue
+    if px, py 在画布范围内: canvas[px, py] = color   // 越界像素裁剪
+```
+
+参考: round 笔刷在 `d=1/2/3/4/5` 时分别覆盖 `1/4/5/12/21` 个像素；square 笔刷覆盖 `d*d` 个像素。
+
+线段 `drawSegment(A -> B)`: 按以下整数 Bresenham 算法从 A 走到 B（方向不得交换），在每个经过的点（含两端）调用 `stamp`。所有变量为有符号整数:
+
+```text
+x = Ax; y = Ay
+dx =  abs(Bx - Ax); sx = (Ax < Bx) ? 1 : -1
+dy = -abs(By - Ay); sy = (Ay < By) ? 1 : -1
+err = dx + dy
+loop:
+  stamp(x, y)
+  if x == Bx and y == By: break
+  e2 = 2 * err
+  if e2 >= dy: err += dy; x += sx
+  if e2 <= dx: err += dx; y += sy
+```
+
+### 16.9 paint.fill（清屏/矩形填充）
+
+请求 TLV:
+- 必填 `session_id(0x0E)`、`paint_seq(0x70)`、`paint_color(0x71)`
+- 可选 `paint_rect(0x76)`: 不携带时填充整个画布
+
+约束:
+- `w >= 1`，`h >= 1`，`x + w <= paint_width`，`y + h <= paint_height`；违反时按无效包处理。
+
+执行:
+- rect 内全部像素置为 `paint_color`，然后 `last_point` 置为无效。
+- 清屏即不带 rect、颜色为 `(0,0,0)` 的 fill。
+
+### 16.10 关键帧（加载图片 / 撤销重做 / 纠错）
+
+用途:
+- 加载图片: 控制端将图片解码、缩放并抖动到画布尺寸，转为 RGB888 像素，作为整幅关键帧发送。
+- 撤销/重做: 控制端发送受影响区域（或整幅）的关键帧。
+- 纠错: 发送整幅关键帧（16.11）。
+
+#### 16.10.1 paint.frame_begin
+
+请求 TLV（全部必填）:
+- `session_id(0x0E)`
+- `paint_seq(0x70)`
+- `paint_frame_id(0x77)`: 非 0，且与本 Paint 会话内之前使用过的 frame_id 都不同
+- `paint_rect(0x76)`: 整幅为 `(0, 0, paint_width, paint_height)`
+- `paint_total_size(0x79)`: 必须等于 `w * h * 3`
+- `chunk_total(0x21)`
+- `chunk_crc32(0x22)`: rect 像素字节流的 CRC32
+
+设备校验:
+- 序号判定（16.5）、rect 合法性（同 16.9）、`paint_total_size`，以及 `1 <= chunk_total <= paint_total_size`。
+- 任一项失败返回 `4001`，此时序号不消耗、画布与已有的传输状态均不变。
+
+接受后:
+1. 若有进行中的关键帧传输，直接丢弃（以新传输替换旧传输）。
+2. 按 16.5 消耗序号（判定为丢包时置 `out_of_sync=true`），`last_point` 置为无效。
+3. 建立新传输: 独立接收缓冲区，下一期望 `chunk_index=0`。此时画布不变。
+4. 返回 `resp`: `ack_for_msg_id`、`paint_frame_id`、`paint_seq`。
+
+#### 16.10.2 paint.frame_chunk
+
+请求 TLV（全部必填）:
+- `session_id(0x0E)`
+- `paint_frame_id(0x77)`
+- `chunk_index(0x20)`
+- `paint_pixels(0x78)`
+
+设备处理:
+- `paint_frame_id` 不是当前传输的 ID: 丢弃，不改变任何状态。
+- `chunk_index` 不等于下一期望值，或累计字节数将超过 `paint_total_size`: 将本次传输标记为失败，此后的分片全部忽略。
+- 否则: 追加到接收缓冲区，期望值加 1。
+
+控制端规则:
+- 必须收到 `frame_begin` 的 `resp` 后，才能发送分片。
+- 分片按 `chunk_index` 从 0 起连续发送；各片长度可不同，总和必须等于 `paint_total_size`。
+- 帧长为 `46 + L` 字节；BLE（MTU 247）下建议 `L <= 180`。整幅 32x32 画布共 3072 字节，按 180 字节分片为 18 片。
+
+#### 16.10.3 paint.frame_end
+
+请求 TLV（全部必填）:
+- `session_id(0x0E)`
+- `paint_frame_id(0x77)`
+- `chunk_total(0x21)`
+- `chunk_crc32(0x22)`
+
+设备校验（全部满足才算成功）:
+- `paint_frame_id` 为当前传输 ID，且传输未被标记为失败。
+- 已收分片数 = 本请求的 `chunk_total` = `frame_begin` 声明的 `chunk_total`。
+- 已收字节数 = `paint_total_size`。
+- 对接收缓冲区计算的 CRC32 = 本请求的 `chunk_crc32` = `frame_begin` 声明的 `chunk_crc32`。
+
+成功:
+1. 将缓冲区一次性写入画布 rect，显示上不得出现半幅更新。
+2. 若 rect 为整幅画布，置 `out_of_sync = false`。
+3. `last_point` 置为无效，并释放传输。
+4. 返回 `resp`: `ack_for_msg_id`、`paint_frame_id`、`paint_seq`（当前 `last_seq`）、`paint_canvas_crc32`（应用后的整画布 CRC）。
+
+失败:
+- 返回 `4061`，释放传输，画布不变，并置 `out_of_sync = true`。
+- 控制端必须使用新的 `paint_seq` 和新的 `paint_frame_id` 重新发起关键帧；不支持单片重传。
+
+超时:
+- 传输建立后，若连续 3000ms 未收到属于该传输的 `frame_chunk` 或 `frame_end`，设备放弃该传输并置 `out_of_sync = true`。之后再收到它的 `frame_end` 返回 `4061`。
+
+传输期间的约束:
+- 从发送 `frame_begin` 到收到 `frame_end` 的回包之前，控制端不得发送 `paint.stroke` / `paint.fill`。
+- 设备在传输期间收到 stroke/fill 时，直接丢弃（不做序号判定，`last_seq` 不变），并置 `out_of_sync = true`。
+- 控制端可在任意时刻发送新的 `frame_begin`，以替换当前传输。
+
+### 16.11 同步校验（paint.sync）
+
+#### 16.11.1 设备上报（event，D→C）
+
+TLV:
+- `session_id(0x0E)`
+- `paint_seq(0x70)`: 当前 `last_seq`
+- `paint_canvas_crc32(0x7A)`: 当前画布 CRC32（不含进行中的关键帧缓冲区）
+- `paint_sync_flags(0x7B)`
+
+发送时机（Paint 激活期间）:
+1. `out_of_sync` 由 false 变为 true 后，在 100ms 内发送一次。
+2. 画布被修改（执行了 stroke/fill 或应用了关键帧）后，若连续 300ms 没有新的修改，发送一次。
+3. 修改持续不断时，至少每 1000ms 发送一次。
+4. 任意两次上报间隔不小于 100ms（期间的触发合并为一次）。画布无变化且 `out_of_sync=false` 时不做周期上报。
+
+#### 16.11.2 控制端查询（cmd，C→D）
+
+- 请求只带 `session_id(0x0E)`。
+- 设备返回 `resp`，内容为 `ack_for_msg_id(0x01)` 加上 16.11.1 的全部 TLV。
+
+#### 16.11.3 控制端处理规则
+
+收到上报或查询结果后，控制端按以下规则处理:
+
+1. `out_of_sync=1`: 立即发送整幅关键帧。若已有整幅关键帧在传输中，则不重复发送。
+2. `frame_transfer_active=1`: 忽略本次 CRC 比较。
+3. `paint_seq` 不等于控制端 `last_sent_seq`: 说明仍有操作在途，忽略本次 CRC 比较。
+4. `paint_seq` 等于 `last_sent_seq`，且 CRC32 与控制端本地画布不一致: 发送整幅关键帧。
+
+### 16.12 paint.end
+
+控制端请求（cmd）:
+- TLV: `session_id(0x0E)`。
+- 设备行为见 16.4 第 3 条；`resp` 只含 `ack_for_msg_id(0x01)`。
+
+设备通知（event）:
+- TLV: `session_id(0x0E)`、`paint_end_reason(0x7F)`。
+- 控制端收到后应立即停止发送 Paint 操作。
+- 若要恢复，控制端需重新 `paint.begin`（设备画布会被清空），然后用整幅关键帧把本地画布恢复到设备。
+
+### 16.13 设备端实现要求
+
+- 操作按接收顺序执行。协议接收回调只负责解码与入队，由显示任务执行绘制，避免与渲染并发访问画布。
+- 从收到操作到在屏幕上显示，延迟应不超过一个显示刷新周期。
+- Paint 画布独立于 `dot2d` 渲染层的物理存储顺序（`dotOrder()`），一律使用 16.1 的逻辑坐标。
+- 本版本不支持画布持久化；画布内容在退出 Paint 后丢弃。
+
+### 16.14 错误场景
+
+| code | 场景 |
+|---:|---|
+| 4001 | `need_ack=1` 的请求字段缺失、长度错误或取值越界；`frame_begin` 序号过期、rect 非法、`paint_total_size` 不匹配；`need_ack` 与 16.2 不符 |
+| 4004 | Paint op_code 的 `app_id` 不为 10；`app.switch` 目标为 10 |
+| 4010 / 4011 | 未握手 / `session_id` 缺失或无效 |
+| 4060 | Paint 未激活时收到 `frame_begin` / `frame_end` / `paint.sync` cmd |
+| 4061 | `frame_end` 校验失败、传输已被替换、已超时或已标记失败 |
+| 5001 | `paint.begin` 时画布或关键帧缓冲区分配失败 |
+
+### 16.15 交互示例
+
+进入 Paint（control -> device）:
+
+```text
+// header: app_id=10, op_code=0x0090, msg_type=cmd, need_ack=1
+0E 00 04 12 34 56 78   // session_id
+```
+
+响应（device -> control）:
+
+```text
+// header: app_id=10, op_code=0x0090, msg_type=resp
+01 00 04 00 00 00 2A   // ack_for_msg_id
+7C 00 02 00 20         // paint_width = 32
+7D 00 02 00 20         // paint_height = 32
+70 00 02 00 00         // paint_seq = 0
+7A 00 04 xx xx xx xx   // paint_canvas_crc32（全黑画布）
+```
+
+加载图片，整幅关键帧（control -> device）:
+
+```text
+// header: app_id=10, op_code=0x0093, msg_type=cmd, need_ack=1
+0E 00 04 12 34 56 78   // session_id
+70 00 02 00 01         // paint_seq = 1
+77 00 04 00 00 00 01   // paint_frame_id = 1
+76 00 04 00 00 20 20   // paint_rect = (0,0,32,32)
+79 00 04 00 00 0C 00   // paint_total_size = 3072
+21 00 02 00 12         // chunk_total = 18
+22 00 04 DE AD BE EF   // chunk_crc32
+
+// header: op_code=0x0094, need_ack=0（共 18 片）
+0E 00 04 12 34 56 78   // session_id
+77 00 04 00 00 00 01   // paint_frame_id = 1
+20 00 02 00 00         // chunk_index = 0
+78 00 B4 ...           // paint_pixels (180 bytes, RGB888)
+
+// header: op_code=0x0095, need_ack=1
+0E 00 04 12 34 56 78   // session_id
+77 00 04 00 00 00 01   // paint_frame_id = 1
+21 00 02 00 12         // chunk_total = 18
+22 00 04 DE AD BE EF   // chunk_crc32
+```
+
+画笔（control -> device），新起一笔，橙色 round 笔刷，直径 2，经过 `(3,4) -> (10,4) -> (10,12)`:
+
+```text
+// header: app_id=10, op_code=0x0091, msg_type=cmd, need_ack=0, qos_level=0
+0E 00 04 12 34 56 78   // session_id
+70 00 02 00 02         // paint_seq = 2
+71 00 03 FF 80 00      // paint_color = (255,128,0)
+72 00 01 02            // paint_brush_shape = round
+73 00 01 02            // paint_brush_size = 2
+74 00 01 01            // paint_stroke_flags = STROKE_START
+75 00 06 03 04 0A 04 0A 0C // paint_points = (3,4),(10,4),(10,12)
+```
+
+续画并结束这一笔（下一包）:
+
+```text
+0E 00 04 12 34 56 78   // session_id
+70 00 02 00 03         // paint_seq = 3
+71 00 03 FF 80 00      // paint_color
+72 00 01 02            // round
+73 00 01 02            // size = 2
+74 00 01 02            // paint_stroke_flags = STROKE_END（从 (10,12) 连线）
+75 00 02 14 0C         // paint_points = (20,12)
+```
+
+设备同步上报（device -> control）:
+
+```text
+// header: app_id=10, op_code=0x0096, msg_type=event
+0E 00 04 12 34 56 78   // session_id
+70 00 02 00 03         // paint_seq = 3
+7A 00 04 xx xx xx xx   // paint_canvas_crc32
+7B 00 01 00            // paint_sync_flags = 0
 ```
 
 ---
