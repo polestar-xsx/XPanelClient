@@ -19,6 +19,7 @@ namespace XPanel.Core.Protocol
     {
         public const ushort AppIdClock = 2;
         public const ushort AppIdPaint = 10;
+        public const ushort AppIdCopilot = 11;
         public const ushort AppIdProtocolMgr = 106;
         public const ushort AppIdRtcMgr = 107;
         public const ushort AppIdNotificationMgr = 101;
@@ -51,6 +52,7 @@ namespace XPanel.Core.Protocol
         public const ushort OpPaintFrameEnd = 0x0095;
         public const ushort OpPaintSync = 0x0096;
         public const ushort OpPaintEnd = 0x0097;
+        public const ushort OpCopilotUsageUpdate = 0x00A0;
 
         // 天气同步模式（wx_mode，见协议第 12 章）
         public const byte WxModeDataSync = 0x01;
@@ -150,6 +152,8 @@ namespace XPanel.Core.Protocol
         public const byte TlvPaintWidth = 0x7C;
         public const byte TlvPaintHeight = 0x7D;
         public const byte TlvPaintEndReason = 0x7F;
+
+        public const byte TlvCopilotUsagePercent = 0x42;
 
         // 天气同步 TLV（见协议第 12.2 节）
         public const byte TlvWxMode = 0x30;

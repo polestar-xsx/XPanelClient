@@ -83,5 +83,31 @@ namespace XPanel.Tests
             Assert.Equal((byte)1, parsed.Tlvs[XpfProtocolConstants.TlvTimeSource][0]);
             Assert.Equal((byte)2, parsed.Tlvs[XpfProtocolConstants.TlvTimeSetMode][0]);
         }
+
+        [Fact]
+        public void SerializeAndDeserialize_CopilotUsageUpdate_RoundTrips()
+        {
+            var frame = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                AppId = XpfProtocolConstants.AppIdCopilot,
+                OpCode = XpfProtocolConstants.OpCopilotUsageUpdate,
+                MsgId = 1234,
+                TimestampSec = 1760000000,
+            };
+            frame.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(0x12345678);
+            frame.Tlvs[XpfProtocolConstants.TlvCopilotUsagePercent] = new byte[] { 75 };
+
+            XpfFrame parsed = XpfCodec.Deserialize(XpfCodec.Serialize(frame));
+
+            Assert.Equal((ushort)11, parsed.AppId);
+            Assert.Equal((ushort)0x00A0, parsed.OpCode);
+            Assert.Equal(XpfMessageType.Cmd, parsed.MessageType);
+            Assert.True(XpfCodec.TryReadUInt32(parsed.Tlvs, XpfProtocolConstants.TlvSessionId, out uint sessionId));
+            Assert.Equal(0x12345678u, sessionId);
+            Assert.Equal(new byte[] { 75 }, parsed.Tlvs[XpfProtocolConstants.TlvCopilotUsagePercent]);
+        }
     }
 }

@@ -113,6 +113,11 @@ namespace XPanel.Application
             {
                 _syncItems = GetDefaultSyncItems();
             }
+            else if (!_syncItems.Any(item => string.Equals(item.Category, "CopilotCredits", StringComparison.OrdinalIgnoreCase)))
+            {
+                _syncItems.Add(new SyncItem("Copilot Credits", "CopilotCredits", false) { Priority = 4 });
+                SaveItems(_syncItems);
+            }
         }
 
         public List<SyncItem> GetAllItems()
@@ -150,6 +155,9 @@ namespace XPanel.Application
                     break;
                 case "Notification":
                     HandleNotificationSync(item);
+                    break;
+                case "CopilotCredits":
+                    System.Diagnostics.Debug.WriteLine($"Copilot Credits: {(item.IsEnabled ? "Enabled" : "Disabled")}");
                     break;
                 default:
                     System.Diagnostics.Debug.WriteLine($"Unknown sync category: {item.Category}");
@@ -982,6 +990,7 @@ namespace XPanel.Application
                 new SyncItem("天气", "Weather", false) { Priority = 1 },
                 new SyncItem("Teams", "Teams", false) { Priority = 2 },
                 new SyncItem("系统通知", "Notification", false) { Priority = 3 },
+                new SyncItem("Copilot Credits", "CopilotCredits", false) { Priority = 4 },
             };
         }
 
@@ -1905,6 +1914,16 @@ namespace XPanel.Application
         private readonly object _weatherSyncLock = new();
         private readonly WeatherService _weatherService = new();
         private static readonly TimeSpan WeatherSyncInterval = TimeSpan.FromMinutes(10);
+        private CancellationTokenSource? _copilotCreditsLoopCts;
+        private readonly object _copilotCreditsSyncLock = new();
+        private readonly SemaphoreSlim _copilotCreditsSendGate = new(1, 1);
+        private readonly Dictionary<string, byte> _copilotCreditsSentPercentByDevice = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly TimeSpan CopilotCreditsSyncInterval = TimeSpan.FromMinutes(10);
+        private CopilotUsageWindow? _copilotUsageWindow;
+        private string? _lastCopilotCreditsSignature;
+        private byte? _lastCopilotCreditsPercent;
+        private CopilotUsageSnapshot? _latestCopilotUsageSnapshot;
+        private bool _hasCopilotCreditsDataThisRun;
         private readonly DispatcherTimer _clockGifPreviewTimer = new() { Interval = TimeSpan.FromMilliseconds(20) };
         private readonly List<ClockGifPreviewState> _clockGifPreviews = new();
 
@@ -2164,6 +2183,27 @@ namespace XPanel.Application
                 if (device.SyncConfig.Count > 0)
                 {
                     _selectedDeviceSyncItems = device.SyncConfig.OrderBy(x => x.Priority).ToList();
+                    bool addedDefault = false;
+                    foreach (var defaultItem in _currentSyncItems)
+                    {
+                        if (_selectedDeviceSyncItems.Any(item => string.Equals(item.Category, defaultItem.Category, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+
+                        _selectedDeviceSyncItems.Add(new SyncItem(defaultItem.Name, defaultItem.Category, defaultItem.IsEnabled)
+                        {
+                            Id = defaultItem.Id,
+                            Priority = defaultItem.Priority,
+                        });
+                        addedDefault = true;
+                    }
+
+                    if (addedDefault)
+                    {
+                        device.SyncConfig = _selectedDeviceSyncItems;
+                        SaveSavedDevicesToConfig();
+                    }
                 }
                 else
                 {
@@ -2237,6 +2277,12 @@ namespace XPanel.Application
 
         private void HandleSyncItemToggled(SyncItem item, bool isEnabled)
         {
+            if (string.Equals(item.Category, "CopilotCredits", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = HandleCopilotCreditsToggleAsync(item, isEnabled);
+                return;
+            }
+
             item.IsEnabled = isEnabled;
             _syncItemService.OnItemToggled(item);
 
@@ -2269,6 +2315,193 @@ namespace XPanel.Application
                 !string.IsNullOrWhiteSpace(_selectedDeviceKey))
             {
                 EnsureWeatherSyncScheduleForDevice(_selectedDeviceKey);
+            }
+        }
+
+        private async Task HandleCopilotCreditsToggleAsync(SyncItem item, bool isEnabled)
+        {
+            string channelKey = _selectedDeviceKey;
+            if (!isEnabled)
+            {
+                item.IsEnabled = false;
+                _copilotUsageWindow?.CancelEnable();
+                _copilotCreditsSentPercentByDevice.Remove(channelKey);
+                PersistSyncConfig(channelKey);
+                EnsureCopilotCreditsSyncSchedule();
+                if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    RefreshSyncItemsUi();
+                }
+                WriteAppLog("Copilot Credits disabled", "CopilotCredits");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(channelKey) || !IsDeviceConnectedForTimeSync(channelKey))
+            {
+                item.IsEnabled = false;
+                System.Windows.MessageBox.Show(
+                    this,
+                    "Connect and select a device before enabling Copilot Credits.",
+                    "Copilot Credits",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                RefreshSyncItemsUi();
+                return;
+            }
+
+            CopilotUsageSnapshot? snapshot = await RequestCopilotUsageLoginAsync();
+            if (snapshot == null)
+            {
+                item.IsEnabled = false;
+                if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    RefreshSyncItemsUi();
+                }
+                WriteAppLog("Copilot Credits enable canceled or usage was not verified", "CopilotCredits");
+                return;
+            }
+
+            item.IsEnabled = true;
+            _syncItemService.OnItemToggled(item);
+            PersistSyncConfig(channelKey);
+            _lastCopilotCreditsSignature = snapshot.Signature;
+            await ProcessCopilotUsageSnapshotAsync(snapshot);
+            WriteAppLog(
+                $"Copilot Credits enabled; baseline={snapshot.UsedCredits}/{snapshot.TotalCredits}; reset='{snapshot.ResetText}'",
+                "CopilotCredits");
+            EnsureCopilotCreditsSyncSchedule();
+            if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
+            {
+                RefreshSyncItemsUi();
+            }
+        }
+
+        private async Task<CopilotUsageSnapshot?> RequestCopilotUsageLoginAsync()
+        {
+            CopilotUsageWindow usageWindow = GetOrCreateCopilotUsageWindow();
+
+            var completion = new TaskCompletionSource<CopilotUsageSnapshot?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnUsageConfirmed(CopilotUsageSnapshot snapshot) => completion.TrySetResult(snapshot);
+            void OnEnableCancelled() => completion.TrySetResult(null);
+
+            usageWindow.UsageConfirmed += OnUsageConfirmed;
+            usageWindow.EnableCancelled += OnEnableCancelled;
+            try
+            {
+                if (!await usageWindow.EnsureBrowserReadyAsync(showForLogin: true))
+                {
+                    WriteAppLog("WebView2 could not initialize for Copilot sign-in", "CopilotCredits");
+                    return null;
+                }
+                return await completion.Task;
+            }
+            finally
+            {
+                usageWindow.UsageConfirmed -= OnUsageConfirmed;
+                usageWindow.EnableCancelled -= OnEnableCancelled;
+            }
+        }
+
+        private CopilotUsageWindow GetOrCreateCopilotUsageWindow()
+        {
+            if (_copilotUsageWindow != null)
+            {
+                return _copilotUsageWindow;
+            }
+
+            _copilotUsageWindow = new CopilotUsageWindow();
+            _copilotUsageWindow.UsageConfirmed += OnCopilotUsageConfirmed;
+            return _copilotUsageWindow;
+        }
+
+        private void OnCopilotUsageConfirmed(CopilotUsageSnapshot snapshot)
+        {
+            _lastCopilotCreditsSignature = snapshot.Signature;
+            WriteAppLog(
+                $"Usage verified: {snapshot.UsedCredits}/{snapshot.TotalCredits} AI credits; reset='{snapshot.ResetText}'",
+                "CopilotCredits");
+        }
+
+        private async Task ProcessCopilotUsageSnapshotAsync(CopilotUsageSnapshot snapshot)
+        {
+            await _copilotCreditsSendGate.WaitAsync();
+            try
+            {
+                byte usedPercent = snapshot.UsedPercent;
+                bool firstDataThisRun = !_hasCopilotCreditsDataThisRun;
+                bool percentChanged = _lastCopilotCreditsPercent != usedPercent;
+                bool creditCountChanged = !string.Equals(_lastCopilotCreditsSignature, snapshot.Signature, StringComparison.Ordinal);
+
+                _hasCopilotCreditsDataThisRun = true;
+                _lastCopilotCreditsSignature = snapshot.Signature;
+                _lastCopilotCreditsPercent = usedPercent;
+                _latestCopilotUsageSnapshot = snapshot;
+
+                if (firstDataThisRun || percentChanged)
+                {
+                    WriteAppLog(
+                        $"Usage {(firstDataThisRun ? "first read this run" : "percentage changed")}: {snapshot.UsedCredits}/{snapshot.TotalCredits} AI credits, sending {usedPercent}%",
+                        "CopilotCredits");
+                }
+                else if (creditCountChanged)
+                {
+                    WriteAppLog(
+                        $"Credits changed to {snapshot.UsedCredits}/{snapshot.TotalCredits}, rounded percent remains {usedPercent}%; no device update needed",
+                        "CopilotCredits");
+                }
+                else
+                {
+                    WriteAppLog($"Usage unchanged: {snapshot.UsedCredits}/{snapshot.TotalCredits}; usedPercent={usedPercent}%", "CopilotCredits");
+                }
+
+                if (System.Windows.Application.Current is not App app)
+                {
+                    return;
+                }
+
+                string[] targetKeys = _savedDevices.Keys
+                    .Where(channelKey => IsCopilotCreditsEnabledForDevice(channelKey) && IsDeviceConnectedForTimeSync(channelKey))
+                    .ToArray();
+                if (targetKeys.Length == 0)
+                {
+                    WriteAppLog("No connected Copilot-enabled devices are available for usage update", "CopilotCredits");
+                    return;
+                }
+
+                foreach (string channelKey in targetKeys)
+                {
+                    if (_copilotCreditsSentPercentByDevice.TryGetValue(channelKey, out byte lastSentPercent) &&
+                        lastSentPercent == usedPercent)
+                    {
+                        continue;
+                    }
+
+                    bool acknowledged = await app.SendCopilotUsagePercentAsync(channelKey, usedPercent);
+                    if (acknowledged)
+                    {
+                        _copilotCreditsSentPercentByDevice[channelKey] = usedPercent;
+                    }
+                    else
+                    {
+                        WriteAppLog($"Device usage update not acknowledged: key={channelKey}, usedPercent={usedPercent}%", "CopilotCredits");
+                    }
+                }
+            }
+            finally
+            {
+                _copilotCreditsSendGate.Release();
+            }
+        }
+
+        private void PersistSyncConfig(string channelKey)
+        {
+            if (!string.IsNullOrEmpty(channelKey) && _savedDevices.TryGetValue(channelKey, out var device))
+            {
+                if (string.Equals(_selectedDeviceKey, channelKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    device.SyncConfig = new List<SyncItem>(_selectedDeviceSyncItems);
+                }
+                SaveSavedDevicesToConfig();
             }
         }
 
@@ -3757,6 +3990,8 @@ namespace XPanel.Application
 
             StopAllTimeSyncSchedules();
             StopAllWeatherSyncSchedules();
+            StopCopilotCreditsSyncSchedule();
+            _copilotUsageWindow?.ClosePermanently();
             ((SyncItemService)_syncItemService).StopNotificationForwarding();
             ((SyncItemService)_syncItemService).StopTeamsForwarding();
             _trayIcon?.Dispose();
@@ -3777,11 +4012,13 @@ namespace XPanel.Application
                 {
                     StopTimeSyncSchedule(e.Key);
                     StopWeatherSyncSchedule(e.Key);
+                    _copilotCreditsSentPercentByDevice.Remove(e.Key);
                     _connectedDevices[e.Key] = existing with
                     {
                         Status = DeviceConnectionVisualState.Disconnected,
                         SessionId = null,
                     };
+                    EnsureCopilotCreditsSyncSchedule();
                     UpdateNotificationForwardingState("channel-disconnected");
                     UpdateTeamsForwardingState("channel-disconnected");
                     RefreshConnectedDeviceUi();
@@ -3797,6 +4034,11 @@ namespace XPanel.Application
 
                 EnsureTimeSyncScheduleForDevice(e.Key);
                 EnsureWeatherSyncScheduleForDevice(e.Key);
+                EnsureCopilotCreditsSyncSchedule();
+                if (_latestCopilotUsageSnapshot != null && IsCopilotCreditsEnabledForDevice(e.Key))
+                {
+                    _ = ProcessCopilotUsageSnapshotAsync(_latestCopilotUsageSnapshot);
+                }
                 UpdateNotificationForwardingState("channel-connected");
                 UpdateTeamsForwardingState("channel-connected");
                 RefreshConnectedDeviceUi();
@@ -3869,6 +4111,11 @@ namespace XPanel.Application
 
                 EnsureTimeSyncScheduleForDevice(channelKey);
                 EnsureWeatherSyncScheduleForDevice(channelKey);
+                EnsureCopilotCreditsSyncSchedule();
+                if (_latestCopilotUsageSnapshot != null && IsCopilotCreditsEnabledForDevice(channelKey))
+                {
+                    _ = ProcessCopilotUsageSnapshotAsync(_latestCopilotUsageSnapshot);
+                }
 
                 _selectedDeviceKey = channelKey;
                 RefreshConnectedDeviceUi();
@@ -3915,6 +4162,7 @@ namespace XPanel.Application
                 {
                     EnsureWeatherSyncScheduleForDevice(channelKey);
                 }
+                EnsureCopilotCreditsSyncSchedule();
 
                 removeButton.IsEnabled = true;
                 System.Windows.MessageBox.Show("Failed to disconnect device.", "Remove Device", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -3923,6 +4171,8 @@ namespace XPanel.Application
 
             _connectedDevices.Remove(channelKey);
             _savedDevices.Remove(channelKey);
+            _copilotCreditsSentPercentByDevice.Remove(channelKey);
+            EnsureCopilotCreditsSyncSchedule();
             UpdateNotificationForwardingState("device-removed");
             UpdateTeamsForwardingState("device-removed");
             RefreshConnectedDeviceUi();
@@ -4586,6 +4836,7 @@ namespace XPanel.Application
                         DeviceConnectionVisualState.Connected,
                         channel);
                     EnsureTimeSyncScheduleForDevice(channelKey);
+                    EnsureCopilotCreditsSyncSchedule();
 
                     WriteAppLog($"Auto-connect success: key={channelKey}, session={handshake.SessionId}", "AutoConnect");
                     successCount++;
@@ -5294,6 +5545,142 @@ namespace XPanel.Application
 
             return device.SyncConfig.Any(item =>
                 string.Equals(item.Category, "Weather", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private bool IsCopilotCreditsEnabledForDevice(string channelKey)
+        {
+            return _savedDevices.TryGetValue(channelKey, out var device) && device.SyncConfig != null &&
+                device.SyncConfig.Any(item =>
+                    string.Equals(item.Category, "CopilotCredits", StringComparison.OrdinalIgnoreCase) && item.IsEnabled);
+        }
+
+        private bool HasConnectedCopilotCreditsDevice()
+        {
+            return _savedDevices.Keys.Any(channelKey =>
+                IsCopilotCreditsEnabledForDevice(channelKey) && IsDeviceConnectedForTimeSync(channelKey));
+        }
+
+        private void EnsureCopilotCreditsSyncSchedule()
+        {
+            if (!HasConnectedCopilotCreditsDevice())
+            {
+                StopCopilotCreditsSyncSchedule();
+                return;
+            }
+
+            CancellationTokenSource loopCts;
+            lock (_copilotCreditsSyncLock)
+            {
+                if (_copilotCreditsLoopCts != null)
+                {
+                    return;
+                }
+
+                loopCts = new CancellationTokenSource();
+                _copilotCreditsLoopCts = loopCts;
+            }
+
+            WriteAppLog("Copilot Credits polling started; interval=10 minutes", "CopilotCredits");
+            _ = RunCopilotCreditsSyncLoopAsync(loopCts);
+        }
+
+        private void StopCopilotCreditsSyncSchedule()
+        {
+            CancellationTokenSource? loopCts;
+            lock (_copilotCreditsSyncLock)
+            {
+                loopCts = _copilotCreditsLoopCts;
+                _copilotCreditsLoopCts = null;
+            }
+
+            if (loopCts == null)
+            {
+                return;
+            }
+
+            loopCts.Cancel();
+            WriteAppLog("Copilot Credits polling stopped", "CopilotCredits");
+        }
+
+        private async Task RunCopilotCreditsSyncLoopAsync(CancellationTokenSource loopCts)
+        {
+            bool waitBeforeFirstPoll = _hasCopilotCreditsDataThisRun;
+            try
+            {
+                while (!loopCts.Token.IsCancellationRequested)
+                {
+                    if (waitBeforeFirstPoll)
+                    {
+                        await Task.Delay(CopilotCreditsSyncInterval, loopCts.Token);
+                    }
+                    waitBeforeFirstPoll = true;
+
+                    if (!HasConnectedCopilotCreditsDevice())
+                    {
+                        break;
+                    }
+
+                    CopilotUsageWindow? usageWindow = null;
+                    CopilotUsageSnapshot? snapshot;
+                    try
+                    {
+                        usageWindow = await Dispatcher.InvokeAsync(() => GetOrCreateCopilotUsageWindow()).Task;
+                        bool browserReady = await Dispatcher.InvokeAsync(
+                            () => usageWindow.EnsureBrowserReadyAsync(showForLogin: false)).Task.Unwrap();
+                        if (!browserReady)
+                        {
+                            throw new InvalidOperationException("WebView2 could not initialize");
+                        }
+
+                        snapshot = await usageWindow.ReadUsageAsync(reload: true);
+                    }
+                    catch (OperationCanceledException) when (loopCts.Token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteAppLog($"Usage refresh failed; sign-in or navigation retry required: {ex.Message}", "CopilotCredits");
+                        if (usageWindow != null)
+                        {
+                            await Dispatcher.InvokeAsync(usageWindow.ShowForReauthentication).Task;
+                        }
+                        continue;
+                    }
+
+                    if (loopCts.Token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    if (snapshot == null)
+                    {
+                        WriteAppLog("Usage check failed: credits text was not found; sign-in may have expired", "CopilotCredits");
+                        await Dispatcher.InvokeAsync(usageWindow.ShowForReauthentication).Task;
+                        continue;
+                    }
+
+                    await ProcessCopilotUsageSnapshotAsync(snapshot);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                WriteAppLog($"Polling error: {ex.Message}", "CopilotCredits");
+            }
+            finally
+            {
+                lock (_copilotCreditsSyncLock)
+                {
+                    if (ReferenceEquals(_copilotCreditsLoopCts, loopCts))
+                    {
+                        _copilotCreditsLoopCts = null;
+                    }
+                }
+                loopCts.Dispose();
+            }
         }
 
         private void EnsureWeatherSyncScheduleForDevice(string channelKey)

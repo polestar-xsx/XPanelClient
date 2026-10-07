@@ -10,6 +10,7 @@ using XPanel.Core.Communication;
 using XPanel.Core.Device;
 using XPanel.Core.Protocol;
 using XPanel.Core.Weather;
+using XPanelMainWindow = XPanel.Application.MainWindow;
 
 namespace XPanel.Application
 {
@@ -206,6 +207,35 @@ namespace XPanel.Application
             }
 
             return await SendWeatherUpdateFrameAsync(channel, sessionId, data, cancellationToken);
+        }
+
+        public async Task<bool> SendCopilotUsagePercentAsync(
+            string key,
+            byte usedPercent,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(key) || usedPercent > 100)
+            {
+                return false;
+            }
+
+            ICommunicationChannel? channel;
+            uint sessionId;
+            lock (_channelLock)
+            {
+                if (!_connectedChannels.TryGetValue(key, out channel) ||
+                    !_channelSessions.TryGetValue(key, out sessionId))
+                {
+                    return false;
+                }
+            }
+
+            if (channel == null)
+            {
+                return false;
+            }
+
+            return await SendCopilotUsagePercentFrameAsync(channel, sessionId, usedPercent, cancellationToken);
         }
 
         public async Task ShutdownConnectionsAsync()
@@ -994,6 +1024,116 @@ namespace XPanel.Application
 
             byte[] payload = XpfCodec.Serialize(frame);
             return await channel.SendAsync(payload, cancellationToken);
+        }
+
+        private static async Task<bool> SendCopilotUsagePercentFrameAsync(
+            ICommunicationChannel channel,
+            uint sessionId,
+            byte usedPercent,
+            CancellationToken cancellationToken)
+        {
+            uint msgId = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+            var request = new XpfFrame
+            {
+                MessageType = XpfMessageType.Cmd,
+                Flags = 0x01,
+                QosLevel = 1,
+                Hop = 0,
+                AppId = XpfProtocolConstants.AppIdCopilot,
+                OpCode = XpfProtocolConstants.OpCopilotUsageUpdate,
+                MsgId = msgId,
+                TimestampSec = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            };
+            request.Tlvs[XpfProtocolConstants.TlvSessionId] = XpfCodec.EncodeUInt32(sessionId);
+            request.Tlvs[XpfProtocolConstants.TlvCopilotUsagePercent] = new[] { usedPercent };
+
+            var responseTcs = new TaskCompletionSource<XpfFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receiveBuffer = new List<byte>(256);
+            void OnDataReceived(object? sender, DataReceivedEventArgs args)
+            {
+                if (args.Data == null || args.Data.Length == 0)
+                {
+                    return;
+                }
+
+                lock (receiveBuffer)
+                {
+                    receiveBuffer.AddRange(args.Data);
+                    while (XPanelMainWindow.TryExtractFirstXpfFrame(receiveBuffer, out byte[] frameBytes))
+                    {
+                        try
+                        {
+                            XpfFrame response = XpfCodec.Deserialize(frameBytes);
+                            if ((response.MessageType == XpfMessageType.Ack || response.MessageType == XpfMessageType.Error) &&
+                                XpfCodec.TryReadUInt32(response.Tlvs, XpfProtocolConstants.TlvAckForMsgId, out uint ackForMsgId) &&
+                                ackForMsgId == msgId)
+                            {
+                                responseTcs.TrySetResult(response);
+                                return;
+                            }
+                        }
+                        catch
+                        {
+                            // 忽略非目标 XPF 帧。
+                        }
+                    }
+                }
+            }
+
+            channel.DataReceived += OnDataReceived;
+            try
+            {
+                await channel.StartReceivingAsync(cancellationToken);
+                bool sent = await channel.SendAsync(XpfCodec.Serialize(request), cancellationToken);
+                if (!sent)
+                {
+                    XPanelMainWindow.WriteAppLog($"Usage update send failed: msgId={msgId}", "CopilotCredits");
+                    return false;
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                using var registration = timeoutCts.Token.Register(() => responseTcs.TrySetCanceled(timeoutCts.Token));
+                XpfFrame response;
+                try
+                {
+                    response = await responseTcs.Task;
+                }
+                catch (OperationCanceledException)
+                {
+                    XPanelMainWindow.WriteAppLog(
+                        cancellationToken.IsCancellationRequested
+                            ? $"Usage update canceled: msgId={msgId}"
+                            : $"Usage update ACK timeout: msgId={msgId}",
+                        "CopilotCredits");
+                    return false;
+                }
+
+                if (response.MessageType == XpfMessageType.Error)
+                {
+                    string error = XpfCodec.TryReadUInt16(response.Tlvs, XpfProtocolConstants.TlvErrCode, out ushort errorCode)
+                        ? errorCode.ToString()
+                        : "unknown";
+                    XPanelMainWindow.WriteAppLog($"Usage update rejected: msgId={msgId}, errCode={error}", "CopilotCredits");
+                    return false;
+                }
+
+                XPanelMainWindow.WriteAppLog($"Usage update ACK received: msgId={msgId}, usedPercent={usedPercent}", "CopilotCredits");
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                XPanelMainWindow.WriteAppLog($"Usage update transport error: msgId={msgId}, error={ex.Message}", "CopilotCredits");
+                return false;
+            }
+            finally
+            {
+                channel.DataReceived -= OnDataReceived;
+            }
         }
 
         // wx_city 协议建议 <=23 字节 UTF-8（设备端 city[24]）；按 UTF-8 边界安全截断。

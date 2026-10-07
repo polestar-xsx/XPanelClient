@@ -1,7 +1,7 @@
 # XPanel 统一通信协议 Draft (V0.5, Binary First)
 
 > 状态: Draft
-> 日期: 2026-08-30
+> 日期: 2026-10-07
 > 目标: 定义 XPanel 在 BLE / 串口 / MQTT 等通信方式下统一的二进制 payload 格式，支持可扩展、可靠传输、按 app_id 路由。
 
 ---
@@ -127,6 +127,7 @@ T(1B) + L(2B) + V(L bytes)
 | 0x27 | cfg_value | bytes | 配置值（二进制） |
 | 0x28 | cfg_item_status | uint8 | 单项状态（0=ok,1=not_found,2=invalid,3=denied,4=failed） |
 | 0x29 | cfg_flags | uint8 | bit0:masked, bit1:readonly |
+| 0x42 | copilot_usage_percent | uint8 | Copilot credit 已使用百分比，整数 0~100（见 §17） |
 | 0x30~0x7F | op params | mixed | 业务参数区 |
 | 0xF0~0xFF | vendor ext | bytes | 厂商扩展 |
 
@@ -156,6 +157,7 @@ T(1B) + L(2B) + V(L bytes)
 | 8 | Reset |
 | 9 | NotiShow |
 | 10 | Paint（仅可通过 `paint.begin` 进入，见 §16） |
+| 11 | Copilot（credit 用量显示，见 §17） |
 
 ### 4.2 服务 ID 预留段
 
@@ -209,6 +211,7 @@ T(1B) + L(2B) + V(L bytes)
 | 0x0095 | paint.frame_end |
 | 0x0096 | paint.sync |
 | 0x0097 | paint.end |
+| 0x00A0 | copilot.usage_update |
 | 0x00F0 | system.reboot |
 
 ---
@@ -1691,6 +1694,70 @@ TLV:
 7A 00 04 xx xx xx xx   // paint_canvas_crc32
 7B 00 01 00            // paint_sync_flags = 0
 ```
+
+---
+
+## 17. Copilot credit 用量显示（控制端 -> 设备）
+
+### 17.1 显示与状态
+
+- App ID 固定为 `11`，保留已有 App ID 不变；仅在收到控制端首次有效用量数据后参与设备按键 App 轮换，位于 Temperature 之后、Tetris 之前。未收到有效数据时，前进和后退导航均跳过 Copilot；`0%` 也是有效数据。
+- 使用文件系统 `/Copilot_icon.png`（项目 `data/Copilot_icon.png`）作为背景，在底部居中叠加白色用量百分比，可完整显示 `0%`~`100%`。
+- 百分比表示 **已使用 credit / 总额度**，由控制端计算并四舍五入为整数；设备不访问 Copilot API，也不保存账号或凭证。
+- 未收到数据时显示 `--%`。最新有效值保存在内存，切换 App 或断开会话不清除，重启后恢复 `--%`，需控制端重新同步。
+- 更新数据不自动切换 App；若 Copilot 正在显示，则下一显示帧刷新。重复发送相同有效值是幂等的。
+- 部署时需同时上传固件与 SPIFFS 文件系统，图片文件名大小写必须保持一致。
+
+### 17.2 用量更新请求
+
+| Header 字段 | 值 |
+|---|---|
+| msg_type | `1`（cmd） |
+| app_id | `11`（`0x000B`） |
+| op_code | `0x00A0`（copilot.usage_update） |
+| flags | 推荐 `0x01`（need_ack） |
+| qos_level | 推荐 `1`（at-least-once） |
+| msg_id | 控制端生成；重传同一请求时保持不变 |
+
+请求必须先完成 HELLO 握手，并从绑定信道发送：
+
+| TLV T | 名称 | 长度 | 要求 |
+|---|---|---:|---|
+| `0x0E` | session_id | 4 | 必填，当前握手返回的 session_id，Big Endian |
+| `0x42` | copilot_usage_percent | 1 | 必填且只能出现一次，uint8，范围 0~100 |
+
+未知 TLV 忽略；任何 TLV 编码截断、缺失百分比、重复百分比、百分比长度不为 1 或值超出 100 均拒绝，且不修改旧值。
+
+响应语义：成功返回 ACK（`msg_type=4`，含 `ack_for_msg_id`）；错误返回 ERROR（含 `ack_for_msg_id` 与 `err_code`）。ACK 表示数值已接受，不表示屏幕已完成刷新。
+
+| err_code | 场景 |
+|---|---|
+| 4001 | 非 cmd 消息，或 TLV/百分比无效 |
+| 4004 | `copilot.usage_update` 的 app_id 不为 11 |
+| 4010 | 未握手 |
+| 4011 | session_id 缺失/错误，或信道与会话不匹配 |
+
+### 17.3 示例与切换
+
+发送已使用 **75%**，假设握手得到 `session_id=0x12345678`：
+
+```text
+// XPF Header: msg_type=1, flags=0x01, qos_level=1,
+// app_id=0x000B, op_code=0x00A0, body_len=11
+// msg_id、ts_sec、hdr_crc16 按通用协议生成。
+0E 00 04 12 34 56 78   // session_id
+42 00 01 4B            // copilot_usage_percent = 75
+```
+
+控制端需要打开 Copilot 页面时，另发送 `app.switch`：
+
+```text
+// XPF Header: msg_type=1, flags=0x01, qos_level=1,
+// app_id=0x000B, op_code=0x0010, body_len=7
+0E 00 04 12 34 56 78   // session_id
+```
+
+此切换请求直接以 Header 的 `app_id=11` 指定目标，不使用附录 A 的 Start/target_app_id 示例格式；成功返回 ACK。
 
 ---
 
