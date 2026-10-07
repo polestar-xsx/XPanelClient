@@ -38,8 +38,22 @@ namespace XPanel.Application
         private int _canvasHeight = DefaultCanvasSize;
         private int _cellSize;
         private byte[] _canvas = new byte[DefaultCanvasSize * DefaultCanvasSize * 3];
-        private readonly Stack<byte[]> _undoStack = new();
-        private readonly Stack<byte[]> _redoStack = new();
+        private readonly Stack<CanvasSnapshot> _undoStack = new();
+        private readonly Stack<CanvasSnapshot> _redoStack = new();
+        private LoadedPicture? _picture;
+        private double _imageScale;
+        private double _fitScale;
+        private double _imageOffsetX;
+        private double _imageOffsetY;
+        private Dictionary<int, Color> _paintOverlay = new();
+        private bool _isMovingImage;
+        private Point _lastImagePosition;
+        private bool _imageSyncPending;
+        private readonly DispatcherTimer _imageSyncTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
+
+        private sealed record LoadedPicture(byte[] Pixels, int Width, int Height);
+        private sealed record CanvasSnapshot(byte[] Pixels, LoadedPicture? Picture, double Scale,
+            double FitScale, double OffsetX, double OffsetY, Dictionary<int, Color> Overlay);
         private Color _selectedColor = Colors.White;
         private Border? _selectedSwatch;
         private int _brushSize = 1;
@@ -62,7 +76,12 @@ namespace XPanel.Application
         {
             InitializeComponent();
             _strokeFlushTimer.Tick += (_, _) => FlushStroke(end: false);
-            PreviewArea.LostMouseCapture += (_, _) => FinishStroke();
+            _imageSyncTimer.Tick += (_, _) => FlushImageSync();
+            PreviewArea.LostMouseCapture += (_, _) =>
+            {
+                FinishStroke();
+                FinishImageMove();
+            };
             BuildPalette();
             ApplyCanvasLayout();
             RenderFrame();
@@ -93,8 +112,10 @@ namespace XPanel.Application
         // 先断开会话再清本地画布，确保清空不会同步到设备。
         internal void OnTabLeft()
         {
+            FinishImageMove();
             FinishStroke();
             _ = StopSessionAsync();
+            ResetPicture();
             Array.Clear(_canvas);
             _undoStack.Clear();
             _redoStack.Clear();
@@ -111,6 +132,7 @@ namespace XPanel.Application
 
         private void ResizeCanvas(int width, int height)
         {
+            ResetPicture();
             _canvasWidth = width;
             _canvasHeight = height;
             _canvas = new byte[width * height * 3];
@@ -141,6 +163,11 @@ namespace XPanel.Application
 
         private void PreviewArea_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            if (_isMovingImage)
+            {
+                return;
+            }
+
             if (!TryGetCanvasPoint(e, out int x, out int y))
             {
                 return;
@@ -152,6 +179,7 @@ namespace XPanel.Application
                 return;
             }
 
+            FlushImageSync(force: true);
             PushUndoSnapshot();
             _strokeColor = _selectedColor;
             _strokeShape = SquareBrushRadio.IsChecked == true ? PaintProtocolSession.BrushSquare : PaintProtocolSession.BrushRound;
@@ -170,6 +198,17 @@ namespace XPanel.Application
 
         private void PreviewArea_MouseMove(object sender, MouseEventArgs e)
         {
+            if (_isMovingImage)
+            {
+                Point current = e.GetPosition(PreviewMatrix);
+                _imageOffsetX += (current.X - _lastImagePosition.X) / _cellSize;
+                _imageOffsetY += (current.Y - _lastImagePosition.Y) / _cellSize;
+                _lastImagePosition = current;
+                RenderPicture();
+                ScheduleImageSync();
+                return;
+            }
+
             if (!_isPainting || !TryGetCanvasPoint(e, out int x, out int y) || (x, y) == _lastPoint)
             {
                 return;
@@ -262,6 +301,10 @@ namespace XPanel.Application
                         _canvas[offset] = _strokeColor.R;
                         _canvas[offset + 1] = _strokeColor.G;
                         _canvas[offset + 2] = _strokeColor.B;
+                        if (_picture != null)
+                        {
+                            _paintOverlay[py * _canvasWidth + px] = _strokeColor;
+                        }
                     }
                 }
             }
@@ -301,9 +344,123 @@ namespace XPanel.Application
 
         private void PushUndoSnapshot()
         {
-            _undoStack.Push((byte[])_canvas.Clone());
+            _undoStack.Push(CaptureSnapshot());
             _redoStack.Clear();
             UpdateUndoRedoState();
+        }
+
+        private CanvasSnapshot CaptureSnapshot()
+        {
+            return new CanvasSnapshot((byte[])_canvas.Clone(), _picture, _imageScale, _fitScale,
+                _imageOffsetX, _imageOffsetY, new Dictionary<int, Color>(_paintOverlay));
+        }
+
+        private void RestoreSnapshot(CanvasSnapshot snapshot)
+        {
+            _canvas = snapshot.Pixels;
+            _picture = snapshot.Picture;
+            _imageScale = snapshot.Scale;
+            _fitScale = snapshot.FitScale;
+            _imageOffsetX = snapshot.OffsetX;
+            _imageOffsetY = snapshot.OffsetY;
+            _paintOverlay = new Dictionary<int, Color>(snapshot.Overlay);
+        }
+
+        private void ResetPicture()
+        {
+            FinishImageMove();
+            _picture = null;
+            _paintOverlay.Clear();
+            _imageSyncPending = false;
+            _imageSyncTimer.Stop();
+        }
+
+        private void PreviewArea_MouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (_picture == null || _isPainting || _isMovingImage || e.Delta == 0)
+            {
+                return;
+            }
+
+            Point cursor = e.GetPosition(PreviewMatrix);
+            double nextScale = Math.Clamp(_imageScale * Math.Pow(1.1, e.Delta / 120.0),
+                _fitScale * 0.1, _fitScale * 20);
+            if (nextScale == _imageScale)
+            {
+                return;
+            }
+
+            PushUndoSnapshot();
+            double cursorX = cursor.X / _cellSize;
+            double cursorY = cursor.Y / _cellSize;
+            double ratio = nextScale / _imageScale;
+            _imageOffsetX = cursorX - (cursorX - _imageOffsetX) * ratio;
+            _imageOffsetY = cursorY - (cursorY - _imageOffsetY) * ratio;
+            _imageScale = nextScale;
+            RenderPicture();
+            ScheduleImageSync();
+            e.Handled = true;
+        }
+
+        private void PreviewArea_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (_picture == null || _isPainting)
+            {
+                return;
+            }
+
+            PushUndoSnapshot();
+            _lastImagePosition = e.GetPosition(PreviewMatrix);
+            _isMovingImage = true;
+            PreviewArea.Cursor = Cursors.SizeAll;
+            PreviewArea.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void PreviewArea_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (_isMovingImage)
+            {
+                FinishImageMove();
+                e.Handled = true;
+            }
+        }
+
+        private void FinishImageMove()
+        {
+            if (!_isMovingImage)
+            {
+                return;
+            }
+
+            _isMovingImage = false;
+            PreviewArea.Cursor = Cursors.Cross;
+            PreviewArea.ReleaseMouseCapture();
+            FlushImageSync();
+        }
+
+        private void ScheduleImageSync()
+        {
+            _imageSyncPending = true;
+            _imageSyncTimer.Start();
+        }
+
+        private void FlushImageSync(bool force = false)
+        {
+            if (!_imageSyncPending)
+            {
+                _imageSyncTimer.Stop();
+                return;
+            }
+
+            if (!force && _session?.KeyframePending == true)
+            {
+                return;
+            }
+
+            _imageSyncPending = false;
+            _imageSyncTimer.Stop();
+            _session?.QueueKeyframe(_canvas);
         }
 
         private async void Start_Click(object sender, RoutedEventArgs e)
@@ -427,7 +584,7 @@ namespace XPanel.Application
                 }
 
                 // 仍有操作在途时本地画布领先于设备，CRC 比较无意义。
-                if (info.FrameTransferActive || _isPainting || _session.HasPendingOperations ||
+                if (info.FrameTransferActive || _isPainting || _isMovingImage || _imageSyncPending || _session.HasPendingOperations ||
                     info.Seq != _session.LastSentSeq)
                 {
                     return;
@@ -460,7 +617,7 @@ namespace XPanel.Application
             var dialog = new OpenFileDialog
             {
                 Title = "Load Picture",
-                Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif",
+                Filter = "Static Image Files|*.png;*.jpg;*.jpeg;*.bmp",
                 CheckFileExists = true,
             };
 
@@ -469,10 +626,26 @@ namespace XPanel.Application
                 return;
             }
 
-            byte[] pixels;
+            LoadedPicture picture;
             try
             {
-                pixels = LoadPictureAsCanvas(dialog.FileName);
+                string extension = Path.GetExtension(dialog.FileName);
+                if (!new[] { ".png", ".jpg", ".jpeg", ".bmp" }.Contains(extension, StringComparer.OrdinalIgnoreCase))
+                {
+                    throw new NotSupportedException("Only PNG, JPG, JPEG and BMP images are supported.");
+                }
+
+                using var stream = File.OpenRead(dialog.FileName);
+                var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+                if (decoder is GifBitmapDecoder || decoder.Frames.Count != 1)
+                {
+                    throw new NotSupportedException("Animated images are not supported.");
+                }
+
+                var source = new FormatConvertedBitmap(decoder.Frames[0], PixelFormats.Bgra32, null, 0);
+                var pixels = new byte[source.PixelWidth * source.PixelHeight * 4];
+                source.CopyPixels(pixels, source.PixelWidth * 4, 0);
+                picture = new LoadedPicture(pixels, source.PixelWidth, source.PixelHeight);
             }
             catch (Exception ex)
             {
@@ -481,73 +654,80 @@ namespace XPanel.Application
                 return;
             }
 
+            FinishStroke();
             PushUndoSnapshot();
-            _canvas = pixels;
-            RenderFrame();
+            ResetPicture();
+            _picture = picture;
+            _fitScale = Math.Min((double)_canvasWidth / picture.Width, (double)_canvasHeight / picture.Height);
+            _imageScale = _fitScale;
+            _imageOffsetX = (_canvasWidth - picture.Width * _imageScale) / 2;
+            _imageOffsetY = (_canvasHeight - picture.Height * _imageScale) / 2;
+            RenderPicture();
             _session?.QueueKeyframe(_canvas);
         }
 
-        // 按比例缩放并居中到黑底画布，缩小时取区域平均；透明像素叠加到黑色上。
-        private byte[] LoadPictureAsCanvas(string filePath)
+        private void RenderPicture()
         {
-            var image = new BitmapImage();
-            image.BeginInit();
-            image.CacheOption = BitmapCacheOption.OnLoad;
-            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-            image.UriSource = new Uri(filePath, UriKind.Absolute);
-            image.EndInit();
-            image.Freeze();
-
-            var source = new FormatConvertedBitmap(image, PixelFormats.Bgra32, null, 0);
-            int sourceWidth = source.PixelWidth;
-            int sourceHeight = source.PixelHeight;
-            var sourcePixels = new byte[sourceWidth * sourceHeight * 4];
-            source.CopyPixels(sourcePixels, sourceWidth * 4, 0);
-
-            double scale = Math.Min((double)_canvasWidth / sourceWidth, (double)_canvasHeight / sourceHeight);
-            int drawWidth = Math.Max(1, (int)Math.Round(sourceWidth * scale));
-            int drawHeight = Math.Max(1, (int)Math.Round(sourceHeight * scale));
-            int offsetX = (_canvasWidth - drawWidth) / 2;
-            int offsetY = (_canvasHeight - drawHeight) / 2;
-
-            var canvas = new byte[_canvasWidth * _canvasHeight * 3];
-            for (int ty = 0; ty < drawHeight; ty++)
+            if (_picture == null)
             {
-                int sy0 = ty * sourceHeight / drawHeight;
-                int sy1 = Math.Max(sy0 + 1, (ty + 1) * sourceHeight / drawHeight);
-                for (int tx = 0; tx < drawWidth; tx++)
+                return;
+            }
+
+            int sourceWidth = _picture.Width;
+            int sourceHeight = _picture.Height;
+            byte[] sourcePixels = _picture.Pixels;
+            var canvas = new byte[_canvasWidth * _canvasHeight * 3];
+            for (int ty = 0; ty < _canvasHeight; ty++)
+            {
+                double top = (ty - _imageOffsetY) / _imageScale;
+                double bottom = (ty + 1 - _imageOffsetY) / _imageScale;
+                int sy0 = Math.Max(0, (int)Math.Floor(top));
+                int sy1 = Math.Min(sourceHeight, (int)Math.Ceiling(bottom));
+                for (int tx = 0; tx < _canvasWidth; tx++)
                 {
-                    int sx0 = tx * sourceWidth / drawWidth;
-                    int sx1 = Math.Max(sx0 + 1, (tx + 1) * sourceWidth / drawWidth);
-                    long sumR = 0, sumG = 0, sumB = 0;
-                    int count = 0;
+                    double left = (tx - _imageOffsetX) / _imageScale;
+                    double right = (tx + 1 - _imageOffsetX) / _imageScale;
+                    int sx0 = Math.Max(0, (int)Math.Floor(left));
+                    int sx1 = Math.Min(sourceWidth, (int)Math.Ceiling(right));
+                    double sumR = 0, sumG = 0, sumB = 0;
+                    double area = (right - left) * (bottom - top);
                     for (int sy = sy0; sy < sy1; sy++)
                     {
                         for (int sx = sx0; sx < sx1; sx++)
                         {
                             int o = (sy * sourceWidth + sx) * 4;
-                            int alpha = sourcePixels[o + 3];
-                            sumB += sourcePixels[o] * alpha / 255;
-                            sumG += sourcePixels[o + 1] * alpha / 255;
-                            sumR += sourcePixels[o + 2] * alpha / 255;
-                            count++;
+                            double weight = (Math.Min(right, sx + 1) - Math.Max(left, sx)) *
+                                (Math.Min(bottom, sy + 1) - Math.Max(top, sy)) * sourcePixels[o + 3] / 255.0;
+                            sumB += sourcePixels[o] * weight;
+                            sumG += sourcePixels[o + 1] * weight;
+                            sumR += sourcePixels[o + 2] * weight;
                         }
                     }
 
-                    int target = ((ty + offsetY) * _canvasWidth + tx + offsetX) * 3;
-                    canvas[target] = (byte)(sumR / count);
-                    canvas[target + 1] = (byte)(sumG / count);
-                    canvas[target + 2] = (byte)(sumB / count);
+                    int target = (ty * _canvasWidth + tx) * 3;
+                    canvas[target] = (byte)Math.Clamp(Math.Round(sumR / area), 0, 255);
+                    canvas[target + 1] = (byte)Math.Clamp(Math.Round(sumG / area), 0, 255);
+                    canvas[target + 2] = (byte)Math.Clamp(Math.Round(sumB / area), 0, 255);
                 }
             }
 
-            return canvas;
+            foreach (var pixel in _paintOverlay)
+            {
+                int offset = pixel.Key * 3;
+                canvas[offset] = pixel.Value.R;
+                canvas[offset + 1] = pixel.Value.G;
+                canvas[offset + 2] = pixel.Value.B;
+            }
+
+            _canvas = canvas;
+            RenderFrame();
         }
 
         private void Clear_Click(object sender, RoutedEventArgs e)
         {
             FinishStroke();
             PushUndoSnapshot();
+            ResetPicture();
             Array.Clear(_canvas);
             RenderFrame();
             _session?.QueueFill(Colors.Black);
@@ -617,9 +797,12 @@ namespace XPanel.Application
                 return;
             }
 
-            _redoStack.Push((byte[])_canvas.Clone());
+            FinishStroke();
+            FinishImageMove();
+            FlushImageSync(force: true);
+            _redoStack.Push(CaptureSnapshot());
             byte[] before = _canvas;
-            _canvas = _undoStack.Pop();
+            RestoreSnapshot(_undoStack.Pop());
             UpdateUndoRedoState();
             RenderFrame();
             SendCanvasDiff(before, _canvas);
@@ -632,9 +815,12 @@ namespace XPanel.Application
                 return;
             }
 
-            _undoStack.Push((byte[])_canvas.Clone());
+            FinishStroke();
+            FinishImageMove();
+            FlushImageSync(force: true);
+            _undoStack.Push(CaptureSnapshot());
             byte[] before = _canvas;
-            _canvas = _redoStack.Pop();
+            RestoreSnapshot(_redoStack.Pop());
             UpdateUndoRedoState();
             RenderFrame();
             SendCanvasDiff(before, _canvas);

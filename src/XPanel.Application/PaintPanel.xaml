@@ -50,6 +50,9 @@
                         CornerRadius="8"
                         ClipToBounds="True"
                         Cursor="Cross"
+                        MouseWheel="PreviewArea_MouseWheel"
+                        MouseRightButtonDown="PreviewArea_MouseRightButtonDown"
+                        MouseRightButtonUp="PreviewArea_MouseRightButtonUp"
                         MouseLeftButtonDown="PreviewArea_MouseLeftButtonDown"
                         MouseMove="PreviewArea_MouseMove"
                         MouseLeftButtonUp="PreviewArea_MouseLeftButtonUp">
